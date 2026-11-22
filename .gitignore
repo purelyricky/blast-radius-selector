@@ -17,3 +17,4 @@ baseline-review.jsonl
 artifacts/
 artifacts-*.txt
 .coverage*
+ref/
