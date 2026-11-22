@@ -5,6 +5,7 @@ This module never imports sqlglot and never reads sample failing-test answers.
 from __future__ import annotations
 
 import ast
+import re
 from collections import defaultdict
 import copy
 import gzip
@@ -12,7 +13,11 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
+from equivalence import normalize
 from patches import InvalidPatch, apply_patch, parse_patch
+
+
+_COMPARE = re.compile(r"^[+-](?![+-]{2}).*(is|==|!=)", re.M)
 
 
 class BroadChange(ValueError):
@@ -130,6 +135,12 @@ class DependencySelector:
         self.function_tests = {}
         self.last_reason = ""
         self.refiner = None
+        self.proven_sites = frozenset()
+        eq_path = Path(map_path).with_name("eq_sites.json")
+        if eq_path.exists():
+            eq = json.loads(eq_path.read_text(encoding="utf-8"))
+            if eq.get("revision") == self.map["revision"]:
+                self.proven_sites = frozenset(eq["proven"])
 
     def _numbers(self, indices):
         return {self.numbers[index] for index in indices if self.numbers[index] is not None}
@@ -178,6 +189,11 @@ class DependencySelector:
                 if path.startswith("tests/"):
                     selected.update(self.by_file.get(path, self.all_numbers))
                     continue
+                if self.proven_sites and _COMPARE.search(patch_text):
+                    # is<->== swaps at sites whose observed operands all use
+                    # identity equality cannot change any test (equivalence.py).
+                    before = normalize(before, path, self.proven_sites)
+                    after = normalize(after, path, self.proven_sites)
                 deferred = []
                 try:
                     functions = changed_functions(before, after, pairs=True)
