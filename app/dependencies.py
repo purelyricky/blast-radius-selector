@@ -20,6 +20,7 @@ from patches import InvalidPatch, apply_patch, parse_patch
 
 
 _INERT = re.compile(r"^(docs/.*|\.github/.*|posts/.*|[^/]*\.(md|rst)|LICENSE|CHANGELOG[^/]*)$")
+DIAG_EMPTY = ("import-time statement changed",)  # measurement only: not a production policy
 _FAMILY = re.compile(r"^sqlglot/(dialects|parsers|generators|typing)/([a-z0-9_]+)\.py$")
 _COMPARE = re.compile(r"^[+-](?![+-]{2}).*(==|!=)", re.M)  # an is<->== swap always shows one of these
 
@@ -401,4 +402,6 @@ class DependencySelector:
                 if family is not None:
                     self.last_reason = f"dialect-family touch set after: {error}"
                     return family
+            if any(key in str(error) for key in DIAG_EMPTY):
+                return set(self.always)
             return self.all_numbers
