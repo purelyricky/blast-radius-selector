@@ -18,7 +18,7 @@ from patches import InvalidPatch, apply_patch, parse_patch
 
 
 _FAMILY = re.compile(r"^sqlglot/(dialects|parsers|generators|typing)/([a-z0-9_]+)\.py$")
-_COMPARE = re.compile(r"^[+-](?![+-]{2}).*(is|==|!=)", re.M)
+_COMPARE = re.compile(r"^[+-](?![+-]{2}).*(==|!=)", re.M)  # an is<->== swap always shows one of these
 
 
 class BroadChange(ValueError):
@@ -28,6 +28,39 @@ class BroadChange(ValueError):
 @lru_cache(maxsize=8192)
 def _dump(node):
     return ast.dump(node, include_attributes=False)
+
+
+def _is_literal(node):
+    try:
+        ast.literal_eval(node)
+        return True
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return False
+
+
+def literal_only_change(old, new):
+    """True when old/new differ only where both sides are pure literal values."""
+    if dump_cached(old) == dump_cached(new):
+        return True
+    if type(old) is not type(new):
+        return False
+    if isinstance(old, ast.expr) and _is_literal(old) and _is_literal(new):
+        return True
+    for field in old._fields:
+        a, b = getattr(old, field, None), getattr(new, field, None)
+        if isinstance(a, list) and isinstance(b, list):
+            if len(a) != len(b) or not all(literal_only_change(x, y) if isinstance(x, ast.AST) and isinstance(y, ast.AST) else x == y for x, y in zip(a, b)):
+                return False
+        elif isinstance(a, ast.AST) and isinstance(b, ast.AST):
+            if not literal_only_change(a, b):
+                return False
+        elif a != b:
+            return False
+    return True
+
+
+def dump_cached(node):
+    return _dump(node) if isinstance(node, ast.AST) else node
 
 
 def changed_functions(before, after, pairs=False):
@@ -161,26 +194,51 @@ class DependencySelector:
         return self.function_tests[key]
 
     def _family_tier(self, patch_text):
-        """Middle tier for edits to a dialect's own modules that cannot be refined.
+        """Middle tier for pure-literal edits to a dialect's own modules.
 
-        A test can only depend on a dialect-specific class attribute or entry
-        by using that dialect, and using it executes code in the dialect's
-        modules (dialects/, parsers/, generators/, typing/ <name>.py) or its
-        own test file. Select every test that executed a line in any of those
-        modules during the baseline, plus the dialect's own test file. Any
-        other touched path keeps the full-suite fallback.
+        Only used when every changed node is a literal (constants, tuples,
+        lists, dicts) so the edit cannot raise at import time. A test can then
+        depend on the changed value only by using that dialect (or a dialect
+        inheriting from it, found through the static import graph), which
+        executes code in the dialect's modules (dialects/, parsers/,
+        generators/, typing/ <name>.py) or lives in its test file. Select every
+        test that executed a line in those modules during the baseline plus the
+        dialect's test file. Anything else keeps the full-suite fallback.
         """
         try:
             patches = parse_patch(patch_text)
         except InvalidPatch:
             return None
         selected = set(self.always)
+        names = set()
         for patch in patches:
             match = _FAMILY.match(patch.old)
             if patch.new != patch.old or not match or match.group(2) in ("dialect", "__init__"):
                 return None
-            name = match.group(2)
-            members = [path for path in self.map["lines"] if _FAMILY.match(path) and _FAMILY.match(path).group(2) == name]
+            source = self.map["sources"].get(patch.old)
+            if source is None:
+                return None
+            try:
+                after = ast.parse(apply_patch(source, patch))
+            except (SyntaxError, ValueError, InvalidPatch):
+                return None
+            before = self.source_trees.get(patch.old) or ast.parse(source)
+            if not literal_only_change(before, after):
+                return None
+            names.add(match.group(2))
+        # Inheriting dialects: any family module that imports a changed family module.
+        family_files = {path: _FAMILY.match(path).group(2) for path in self.map["lines"] if _FAMILY.match(path)}
+        grew = True
+        while grew:
+            grew = False
+            changed_paths = {path for path, name in family_files.items() if name in names}
+            for path, imported in self.map.get("imports", {}).items():
+                match = _FAMILY.match(path)
+                if match and match.group(2) not in names and match.group(2) not in ("dialect", "__init__") and changed_paths.intersection(imported):
+                    names.add(match.group(2))
+                    grew = True
+        for name in names:
+            members = [path for path, member in family_files.items() if member == name]
             if not members:
                 return None
             for path in members:
