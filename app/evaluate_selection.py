@@ -15,10 +15,11 @@ def main():
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--map", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--precision", choices=("function", "statement"), default="function")
     args = parser.parse_args()
     started = time.process_time()
     tests = json.loads((args.data / "tests.json").read_text())["tests"]
-    selector = DependencySelector(tests, args.map)
+    selector = DependencySelector(tests, args.map, precision=args.precision)
     items = {test["number"]: (test["number"], round(test["seconds"] * 1000)) for test in tests}
     with args.output.open("w", encoding="utf-8", newline="\n") as output:
         for path in sorted((args.data / "commits").glob("*.patch")):

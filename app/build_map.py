@@ -15,8 +15,39 @@ import os
 from pathlib import Path
 import sys
 import time
+import concurrent.futures
+import pickle
 
 PINNED = "eb11aec4be8cb2122afe713a4816662c3f0fb2fa"
+
+
+class InstrumentedExecutor:
+    """Run pool jobs under their submitting test's coverage context.
+
+    Pickle round trips retain the process pool's copy boundaries. These are
+    baseline observations only; production never executes submitted patches.
+    """
+    def __init__(self, max_workers=None, mp_context=None, initializer=None, initargs=(), **kwargs):
+        if initializer:
+            initializer(*pickle.loads(pickle.dumps(initargs)))
+
+    def submit(self, function, /, *args, **kwargs):
+        future = concurrent.futures.Future()
+        try:
+            function, args, kwargs = pickle.loads(pickle.dumps((function, args, kwargs)))
+            future.set_result(pickle.loads(pickle.dumps(function(*args, **kwargs))))
+        except BaseException as error:
+            future.set_exception(error)
+        return future
+
+    def shutdown(self, wait=True, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.shutdown()
 
 
 def module_name(path):
@@ -103,6 +134,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--coverage", type=Path, default=Path("artifacts/.coverage"))
     parser.add_argument("--reuse", action="store_true", help="reuse completed coverage and recorder files")
+    parser.add_argument("--real-workers", action="store_true", help="diagnostic only: do not trace child-process computations inline")
     args = parser.parse_args()
     root = args.source.resolve()
     output = args.output.resolve()
@@ -118,6 +150,8 @@ def main():
     else:
         import pytest
         recorder = Recorder(root, cov)
+        if not args.real_workers:
+            concurrent.futures.ProcessPoolExecutor = InstrumentedExecutor
         sys.addaudithook(recorder.audit)
         sys.path.insert(0, str(root))
         os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
@@ -172,9 +206,22 @@ def main():
     reads = {path: sorted({n for context in contexts for n in expand(context)}) for path, contexts in recorded["reads"].items()}
     if not any(lines.values()):
         raise RuntimeError("No test coverage recorded")
-    result = {"version": 1, "revision": PINNED, "ids": ids, "always": [index[nodeid] for nodeid in recorded["failed"]], "sources": sources, "imports": imports, "lines": lines, "import_lines": import_lines, "reads": reads}
+    # Most neighboring lines have identical test sets. Intern them so the
+    # committed map stays a small plain JSON file and loads with little CPU.
+    groups = []
+    group_index = {}
+    def intern(tests):
+        key = tuple(tests)
+        if key not in group_index:
+            group_index[key] = len(groups)
+            groups.append(tests)
+        return group_index[key]
+    lines = {path: {line: intern(tests) for line, tests in file_lines.items()} for path, file_lines in lines.items()}
+    reads = {path: intern(tests) for path, tests in reads.items()}
+    result = {"version": 2, "revision": PINNED, "ids": ids, "always": [index[nodeid] for nodeid in recorded["failed"]], "sources": sources, "imports": imports, "groups": groups, "lines": lines, "import_lines": import_lines, "reads": reads}
     output.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(output, "wt", encoding="utf-8", compresslevel=9) as handle:
+    opener = gzip.open if output.suffix == ".gz" else open
+    with opener(output, "wt", encoding="utf-8") as handle:
         json.dump(result, handle, separators=(",", ":"), ensure_ascii=False)
     print(f"Map: {len(ids)} tests, {len(sources)} files, {sum(map(len, lines.values()))} covered lines, {len(reads)} read files, {len(recorded['failed'])} baseline failures; {output.stat().st_size} bytes; {time.monotonic() - started:.1f}s", file=sys.stderr)
 
