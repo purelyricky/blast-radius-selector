@@ -17,6 +17,7 @@ from equivalence import normalize
 from patches import InvalidPatch, apply_patch, parse_patch
 
 
+_FAMILY = re.compile(r"^sqlglot/(dialects|parsers|generators|typing)/([a-z0-9_]+)\.py$")
 _COMPARE = re.compile(r"^[+-](?![+-]{2}).*(is|==|!=)", re.M)
 
 
@@ -159,6 +160,34 @@ class DependencySelector:
             self.function_tests[key] = self._numbers(indices)
         return self.function_tests[key]
 
+    def _family_tier(self, patch_text):
+        """Middle tier for edits to a dialect's own modules that cannot be refined.
+
+        A test can only depend on a dialect-specific class attribute or entry
+        by using that dialect, and using it executes code in the dialect's
+        modules (dialects/, parsers/, generators/, typing/ <name>.py) or its
+        own test file. Select every test that executed a line in any of those
+        modules during the baseline, plus the dialect's own test file. Any
+        other touched path keeps the full-suite fallback.
+        """
+        try:
+            patches = parse_patch(patch_text)
+        except InvalidPatch:
+            return None
+        selected = set(self.always)
+        for patch in patches:
+            match = _FAMILY.match(patch.old)
+            if patch.new != patch.old or not match or match.group(2) in ("dialect", "__init__"):
+                return None
+            name = match.group(2)
+            members = [path for path in self.map["lines"] if _FAMILY.match(path) and _FAMILY.match(path).group(2) == name]
+            if not members:
+                return None
+            for path in members:
+                selected.update(self._numbers(i for g in self.map["lines"][path].values() for i in self._indices(g)))
+            selected.update(self.by_file.get(f"tests/dialects/test_{name}.py", ()))
+        return selected
+
     def select(self, patch_text):
         try:
             patches = parse_patch(patch_text)
@@ -189,11 +218,15 @@ class DependencySelector:
                 if path.startswith("tests/"):
                     selected.update(self.by_file.get(path, self.all_numbers))
                     continue
-                if self.proven_sites and _COMPARE.search(patch_text):
+                if self.proven_sites and len(patches) == 1 and _COMPARE.search(patch_text):
                     # is<->== swaps at sites whose observed operands all use
                     # identity equality cannot change any test (equivalence.py).
-                    before = normalize(before, path, self.proven_sites)
-                    after = normalize(after, path, self.proven_sites)
+                    normalized_before = normalize(before, path, self.proven_sites)
+                    normalized_after = normalize(after, path, self.proven_sites)
+                    # Ordinals remain meaningful only when every other AST
+                    # component (including operands and bindings) is identical.
+                    if _dump(normalized_before) == _dump(normalized_after):
+                        before, after = normalized_before, normalized_after
                 deferred = []
                 try:
                     functions = changed_functions(before, after, pairs=True)
@@ -218,4 +251,9 @@ class DependencySelector:
             return selected
         except (InvalidPatch, BroadChange, SyntaxError, UnicodeError, ValueError, TypeError, RecursionError, MemoryError) as error:
             self.last_reason = f"full-suite fallback: {type(error).__name__}: {error}"
+            if isinstance(error, BroadChange):
+                family = self._family_tier(patch_text)
+                if family is not None:
+                    self.last_reason = f"dialect-family touch set after: {error}"
+                    return family
             return self.all_numbers
