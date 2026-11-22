@@ -39,13 +39,16 @@ def _is_literal(node):
 
 
 def literal_only_change(old, new):
-    """True when old/new differ only where both sides are pure literal values."""
+    """True when old/new differ only in same-type constant leaves, structure unchanged."""
     if dump_cached(old) == dump_cached(new):
         return True
     if type(old) is not type(new):
         return False
-    if isinstance(old, ast.expr) and _is_literal(old) and _is_literal(new):
-        return True
+    if isinstance(old, ast.Constant):
+        # Same-type, non-degenerate leaf swap (e.g. -1 -> -2, 16 -> 17, 'a' -> 'b'):
+        # no structure changes, so nothing downstream sees a new shape or type.
+        a, b = old.value, new.value
+        return type(a) is type(b) and not (isinstance(a, (str, bytes)) and (not a or not b))
     for field in old._fields:
         a, b = getattr(old, field, None), getattr(new, field, None)
         if isinstance(a, list) and isinstance(b, list):
