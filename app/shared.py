@@ -226,9 +226,16 @@ class SharedRefiner:
         # Class-local reads bypass attribute lookup and can eagerly derive
         # other fields; retain the broad fallback for those definitions.
         for statement in class_node.body:
-            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                continue
-            if any(isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id == field for node in ast.walk(statement)):
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                eager = list(statement.decorator_list) + list(statement.args.defaults) + [node for node in statement.args.kw_defaults if node is not None]
+                eager += [arg.annotation for arg in statement.args.posonlyargs + statement.args.args + statement.args.kwonlyargs if arg.annotation is not None]
+                if statement.returns is not None:
+                    eager.append(statement.returns)
+            elif isinstance(statement, ast.ClassDef):
+                eager = list(statement.bases) + list(statement.decorator_list) + [keyword.value for keyword in statement.keywords]
+            else:
+                eager = [statement]
+            if any(isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id == field for expression in eager for node in ast.walk(expression)):
                 raise UnsafeValue("class-local eager dependency")
         classkey = path + "::" + qualname
         self.metaclasses_safe(classkey)

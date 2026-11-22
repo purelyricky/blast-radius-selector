@@ -82,6 +82,12 @@ class SharedValues(unittest.TestCase):
         result, _ = self.refine(old, new)
         self.assertEqual(ast.dump(result), ast.dump(ast.parse(new)))
 
+    def test_method_defaults_capture_class_values_eagerly(self):
+        old = "class C:\n X=1\n def f(self,y=X): return y\n"
+        new = old.replace("X=1", "X=2")
+        result, _ = self.refine(old, new)
+        self.assertEqual(ast.dump(result), ast.dump(ast.parse(new)))
+
     def test_decorated_and_special_fields_stay_broad(self):
         for old, new in [("@decorate\nclass C:\n X=1\n", "@decorate\nclass C:\n X=2\n"), ("class C:\n __slots__=['x']\n", "class C:\n __slots__=['y']\n")]:
             result, _ = self.refine(old, new)
