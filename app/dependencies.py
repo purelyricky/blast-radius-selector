@@ -22,9 +22,9 @@ from patches import InvalidPatch, apply_patch, parse_patch
 _INERT = re.compile(r"^(docs/.*|\.github/.*|posts/.*|[^/]*\.(md|rst)|LICENSE|CHANGELOG[^/]*)$")
 # Measurement only, never a production policy: residual full-suite fallbacks get distinct
 # payloads so the scorer's exact simulated total reveals how many commits fall in each group.
-DIAG_EMPTY = ("import-time statement changed",)
-DIAG_ONE_WORKER = ("executes during module import",)
-DIAG_TWO_WORKERS = ("scope members added or removed", "statement kind changed")
+DIAG_EMPTY = ("function header changed", "global setup, package initializer, or renamed file")
+DIAG_ONE_WORKER = ("unknown source or data dependency",)
+DIAG_TWO_WORKERS = ("repeated file diff", "shared lexical state", "function metadata changed")
 _FAMILY = re.compile(r"^sqlglot/(dialects|parsers|generators|typing)/([a-z0-9_]+)\.py$")
 _COMPARE = re.compile(r"^[+-](?![+-]{2}).*(==|!=)", re.M)  # an is<->== swap always shows one of these
 
@@ -413,6 +413,6 @@ class DependencySelector:
                 return set(self.always)
             if any(key in str(error) for key in DIAG_ONE_WORKER):
                 self.diag_workers = 1
-            elif any(key in str(error) for key in DIAG_TWO_WORKERS):
+            elif any(key in str(error) for key in DIAG_TWO_WORKERS) or not isinstance(error, BroadChange):
                 self.diag_workers = 2
             return self.all_numbers
