@@ -20,6 +20,7 @@ from membership import membership_changes, name_regex
 from family import change_ok, docstring_only, header_default_changes, known_names
 from patches import InvalidPatch, apply_patch, parse_patch
 from package_changes import body_only as package_body_only, generator_kind, nested_body_only, region_imported
+from source_reuse import SourceSpans, reuse_statements
 
 
 _INERT = re.compile(r"^(docs/.*|\.github/.*|posts/.*|[^/]*\.(md|rst)|LICENSE|CHANGELOG[^/]*)$")
@@ -198,6 +199,7 @@ class DependencySelector:
         self.always = self.all_numbers - set(self.numbers)
         self.always.update(self._numbers(self.map.get("always", [])))
         self.source_trees = {}
+        self.source_spans = {}
         self.import_lines = self.map.get("import_lines", {})
         execution_path = Path(map_path).with_name("import_execution.json")
         if execution_path.exists():
@@ -479,6 +481,9 @@ class DependencySelector:
                 if before is None:
                     before = ast.parse(source, filename=path)
                     self.source_trees[path] = before
+                if path not in self.source_spans:
+                    self.source_spans[path] = SourceSpans(source)
+                after = reuse_statements(before, after, self.source_spans[path], modified)
                 if path.endswith("/__init__.py") and not package_body_only(before, after):
                     raise BroadChange("package initializer has eager or structural changes")
                 if path.startswith("tests/"):
