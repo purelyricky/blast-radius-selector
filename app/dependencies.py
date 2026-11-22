@@ -22,8 +22,11 @@ from package_changes import body_only as package_body_only, generator_kind, nest
 
 
 _INERT = re.compile(r"^(docs/.*|\.github/.*|posts/.*|[^/]*\.(md|rst)|LICENSE|CHANGELOG[^/]*)$")
+_PYTEST_CONFIG = ("conftest.py", "pytest.ini", "tox.ini")
+_CONFIG_MAYBE = ("setup.cfg", "pyproject.toml")  # inert unless the patch mentions pytest
 _FAMILY = re.compile(r"^sqlglot/(dialects|parsers|generators|typing)/([a-z0-9_]+)\.py$")
 _COMPARE = re.compile(r"^[+-](?![+-]{2}).*(==|!=)", re.M)  # an is<->== swap always shows one of these
+_PREDICATE = re.compile(r"^[+-](?![+-]{2}).*(==|!=|<|>)", re.M)
 
 
 class BroadChange(ValueError):
@@ -190,12 +193,23 @@ class DependencySelector:
         self.refiner = None
         self.shared_refiner = None
         self.family_names = None
+        self._mentions_pytest = False
         self.shared_metadata = None
-        shared_path = Path(map_path).with_name("shared_reads.json")
+        shared_path = Path(map_path).with_name("shared_reads.json.gz")
+        if not shared_path.exists():
+            shared_path = Path(map_path).with_name("shared_reads.json")
         if shared_path.exists():
-            shared = json.loads(shared_path.read_text(encoding="utf-8"))
+            opener = gzip.open if shared_path.suffix == '.gz' else open
+            with opener(shared_path, 'rt', encoding='utf-8') as handle:
+                shared = json.load(handle)
             if shared.get("version") == 2 and shared.get("revision") == self.map["revision"] and shared.get("ids") == self.map["ids"]:
                 self.shared_metadata = shared
+        self.predicate_refiner = None
+        predicate_path = Path(map_path).with_name('predicate_values.json.gz')
+        if predicate_path.exists():
+            from predicate_values import PredicateRefiner
+            with gzip.open(predicate_path, 'rt', encoding='utf-8') as handle:
+                self.predicate_refiner = PredicateRefiner(json.load(handle), self.map['revision'], self.map['ids'])
         self.proven_sites = frozenset()
         self.equivalence_keys = {}
         eq_path = Path(map_path).with_name("eq_sites.json")
@@ -228,16 +242,36 @@ class DependencySelector:
                 selected.update(self._numbers(self._indices(self.map["reads"][patch.old])))
         return selected
 
+    def _inert_path(self, path):
+        """A path no baseline test can observe: never imported, opened or collected."""
+        if path in self.map["sources"] or path in self.map["reads"]:
+            return False
+        if _INERT.match(path):
+            return True
+        name = path.rsplit("/", 1)[-1]
+        if name in _PYTEST_CONFIG or (name in _CONFIG_MAYBE and self._mentions_pytest):
+            return False
+        if path.startswith("tests/"):
+            return path.endswith(".py") and name != "__init__.py"  # a new test module is not in tests.json
+        if path.startswith("sqlglot/"):
+            # A brand-new module nothing in the baseline imports (dialect packages auto-register, keep those broad).
+            return path.endswith(".py") and name != "__init__.py" and not _FAMILY.match(path)
+        return True  # repository metadata outside the packages: pyproject, setup, Makefile, benchmarks, ...
+
     def _inert_tier(self, patch_text):
-        """Paths no test can read: prose docs, CI metadata, license/changelog files."""
+        """Paths no test can read: prose docs, CI metadata, packaging files, unreferenced new modules."""
         try:
             patches = parse_patch(patch_text)
         except InvalidPatch:
             return False
-        return bool(patches) and all(
-            _INERT.match(patch.old) and _INERT.match(patch.new) and patch.old not in self.map["reads"] and patch.old not in self.map["sources"]
-            for patch in patches
-        )
+        if not patches:
+            return False
+        self._mentions_pytest = "pytest" in patch_text.lower()
+        for patch in patches:
+            paths = {path for path in (patch.old, patch.new) if path != "/dev/null"}
+            if not paths or not all(self._inert_path(path) for path in paths):
+                return False
+        return True
 
     def _docstring_tier(self, patch_text):
         try:
@@ -366,6 +400,12 @@ class DependencySelector:
                     if path not in self.equivalence_keys:
                         self.equivalence_keys[path] = site_keys(path, before)
                     if equivalent_edits(before, after, path, self.proven_sites, self.equivalence_keys[path]):
+                        continue
+                if self.predicate_refiner is not None and len(patches) == 1 and _PREDICATE.search(patch_text):
+                    indices = self.predicate_refiner.select(before, after, path)
+                    if indices is not None:
+                        selected.update(self._numbers(indices))
+                        scopes += 1
                         continue
                 deferred = []
                 try:
