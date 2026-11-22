@@ -12,3 +12,8 @@ target/
 .env
 data/
 *.parquet
+vendor/
+baseline-review.jsonl
+artifacts/
+artifacts-*.txt
+.coverage*

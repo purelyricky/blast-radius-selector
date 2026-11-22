@@ -1,0 +1,6 @@
+# Development only: generate coverage on the scorer's Python/SQLite platform.
+FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
+RUN pip install --no-cache-dir pytest==9.2.0 coverage==7.17.0 duckdb==2.0.0 pandas==3.1.1 numpy==2.5.5 python-dateutil==4.0.0 pytz==2026.6 typing_extensions==4.16.0 setuptools==84.2.1 setuptools-scm==10.3.4
+COPY app/build_map.py /app/build_map.py
+WORKDIR /workspace
+CMD ["python", "/app/build_map.py", "--source", "/source", "--output", "/output/map-linux.json.gz", "--coverage", "/output/.coverage-linux"]
