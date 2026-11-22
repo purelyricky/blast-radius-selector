@@ -13,7 +13,7 @@ def main():
     all_numbers = frozenset(item_by_number)
     cache = {all_numbers: pack(items)}
     selector = None
-    map_path = Path(os.environ.get("BR_MAP", str(Path(__file__).with_name("dependency_map.json"))))
+    map_path = Path(os.environ.get("BR_MAP", str(Path(__file__).with_name("dependency_map.json.gz"))))
     try:
         from dependencies import DependencySelector
         selector = DependencySelector(tests, map_path, precision=os.environ.get("BR_PRECISION", "statement"))
