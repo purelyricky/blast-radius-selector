@@ -3,6 +3,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from packer import pack
 
+DIAG_CLASSES = {"cmp"}
 DATA = Path(os.environ.get("BR_DATA", "/data"))
 
 
@@ -28,6 +29,14 @@ def main():
                 print(f"{p.stem}: full-suite fallback: {type(error).__name__}", file=sys.stderr)
             if os.environ.get("BR_DEBUG"):
                 print(f"{p.stem}: {len(selected)} tests; {selector.last_reason}", file=sys.stderr)
+        # Measurement only (branch diag-4): drop heavy tests (>= 3 s) when every minimal AST difference is a comparison-operator change.
+        if selector is not None:
+            try:
+                from diag_classify import classify
+                if classify(selector, p.read_text(encoding="utf-8")) == DIAG_CLASSES:
+                    selected = frozenset(n for n in selected if item_by_number[n][1] < 3000)
+            except Exception:
+                pass
         if selected not in cache:
             cache[selected] = pack([item_by_number[n] for n in sorted(selected)])
         print(json.dumps({"commit": p.stem, "workers": cache[selected]}, separators=(",", ":")))
