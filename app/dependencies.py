@@ -14,7 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from compare_equivalence import equivalent_edits
-from equivalence import site_keys
+from equivalence import flip_sites, site_keys
 from deferred import deferred_body_changes
 from membership import membership_changes, name_regex
 from family import change_ok, docstring_only, header_default_changes, known_names
@@ -195,6 +195,7 @@ class DependencySelector:
         if self.map.get("version") not in (1, 2) or self.map.get("revision") != "eb11aec4be8cb2122afe713a4816662c3f0fb2fa":
             raise ValueError("incompatible dependency map")
         number_by_id = {test["id"]: test["number"] for test in tests}
+        self.number_by_id = number_by_id
         self.numbers = [number_by_id.get(nodeid) for nodeid in self.map["ids"]]
         self.always = self.all_numbers - set(self.numbers)
         self.always.update(self._numbers(self.map.get("always", [])))
@@ -218,12 +219,15 @@ class DependencySelector:
         self._predicate_loaded = False
         self._predicate_refiner = None
         self.proven_sites = frozenset()
+        self.flip_differ = None
         self.equivalence_keys = {}
         eq_path = Path(map_path).with_name("eq_sites.json")
         if eq_path.exists():
             eq = json.loads(eq_path.read_text(encoding="utf-8"))
             if eq.get("revision") == self.map["revision"]:
                 self.proven_sites = frozenset(eq["proven"])
+                if "differ" in eq:
+                    self.flip_differ = eq["differ"]
 
     @property
     def shared_metadata(self):
@@ -279,6 +283,23 @@ class DependencySelector:
             if patch.old in self.map["reads"]:
                 selected.update(self._numbers(self._indices(self.map["reads"][patch.old])))
         return selected
+
+    def _flip_tests(self, site):
+        """Test numbers whose baseline run saw is/== disagree at `site`; None if any context cannot be resolved."""
+        numbers = set()
+        for context in self.flip_differ.get(site, ()):
+            if context.startswith("scope:"):
+                scope = context[len("scope:"):]
+                members = [number for nodeid, number in self.number_by_id.items() if nodeid == scope or nodeid.startswith(scope + "::")]
+                if not members:
+                    return None
+                numbers.update(members)
+            else:
+                number = self.number_by_id.get(context)
+                if number is None:  # import/collection time ('') or an unknown test
+                    return None
+                numbers.add(number)
+        return numbers
 
     def _inert_path(self, path):
         """A path no baseline test can observe: never imported, opened or collected."""
@@ -496,6 +517,25 @@ class DependencySelector:
                         self.equivalence_keys[path] = site_keys(path, before)
                     if equivalent_edits(before, after, path, self.proven_sites, self.equivalence_keys[path]):
                         continue
+                    flips = flip_sites(before, after, self.equivalence_keys[path])
+                    if flips is not None and self.flip_differ is not None:
+                        # Swap observed to change an answer only in these tests (baseline evaluation of both forms).
+                        # Sites running while importing, or with unresolvable contexts, keep the ordinary selection.
+                        import_lines = self.import_lines.get(path, ())
+                        refined = set()
+                        for site, node in flips:
+                            if site in self.flip_differ and any(node.lineno <= line <= node.end_lineno for line in import_lines):
+                                refined = None
+                                break
+                            tests = self._flip_tests(site)
+                            if tests is None:
+                                refined = None
+                                break
+                            refined.update(tests)
+                        if refined is not None:
+                            selected.update(refined)
+                            scopes += len(flips)
+                            continue
                 if self.predicate_refiner is not None and len(patches) == 1 and _PREDICATE.search(patch_text):
                     indices = self.predicate_refiner.select(before, after, path, coverage=lambda node: self._coverage_indices(path, node))
                     if indices is not None:

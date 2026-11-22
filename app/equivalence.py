@@ -111,52 +111,88 @@ def instrument_source(path, source):
 
 
 class Probe:
+    """Evaluates the flipped operator next to the original at every is/==/!= site.
+
+    A site is "proven" when every observed operand pair gives the same answer
+    under both forms (so swapping them cannot change any test); otherwise the
+    tests during which the answers differed are recorded per site.
+    """
+
     def __init__(self):
-        self.unsafe = set()
         self.seen = set()
-        self.cache = {}
+        self.differ = {}
+        self.current = ""
+        self.busy = False
 
     def __call__(self, key, op, left, right):
-        pair = (type(left), type(right))
-        safe = self.cache.get(pair)
-        if safe is None:
-            safe = self.classify(pair)
-            self.cache[pair] = safe
         self.seen.add(key)
-        if not safe:
-            self.unsafe.add(key)
         if op == "is":
-            return left is right
-        if op == "is not":
-            return left is not right
-        if op == "==":
-            return left == right
-        return left != right
-
-    @staticmethod
-    def classify(pair):
-        import enum
-
-        def default_eq(t):
-            return t is type(None) or (t.__eq__ is object.__eq__ and t.__ne__ is object.__ne__)
-
-        def plain_enum(t):
-            # Members are unique per value, so equal (even through str/int
-            # mixins) means the very same member. Flags can build new members.
-            return (
-                issubclass(t, enum.Enum)
-                and not issubclass(t, enum.Flag)
-                and t.__eq__ in (object.__eq__, str.__eq__, int.__eq__, enum.Enum.__eq__)
-                and t.__ne__ in (object.__ne__, str.__ne__, int.__ne__, enum.Enum.__ne__)
-            )
-
-        ta, tb = pair
-        if default_eq(ta) and default_eq(tb):
-            return True
-        if ta is tb and plain_enum(ta):
-            return True
-        none = type(None)
-        return (ta is none and plain_enum(tb)) or (tb is none and plain_enum(ta))
+            result = left is right
+        elif op == "is not":
+            result = left is not right
+        elif op == "==":
+            result = left == right
+        else:
+            result = left != right
+        if self.busy:
+            # Observed while evaluating another site's alternative form (e.g. the `is` inside
+            # Expr.__eq__ itself): the interaction is unknown, so this site is never proven.
+            self.differ.setdefault(key, set()).add("")
+            return result
+        self.busy = True
+        try:
+            if op == "is":
+                other = left == right
+            elif op == "is not":
+                other = left != right
+            elif op == "==":
+                other = left is right
+            else:
+                other = left is not right
+            same = other is result or (type(other) is bool and type(result) is bool and other == result)
+        except BaseException:
+            same = False
+        finally:
+            self.busy = False
+        if not same:
+            self.differ.setdefault(key, set()).add(self.current)
+        return result
 
     def proven(self):
-        return sorted(self.seen - self.unsafe)
+        return sorted(self.seen - set(self.differ))
+
+
+_SWAPS = (frozenset((ast.Is, ast.Eq)), frozenset((ast.IsNot, ast.NotEq)))
+
+
+def flip_sites(before, after, keys):
+    """(site key, old Compare node) of the comparisons whose only difference is an is<->== / is not<->!= swap.
+
+    Returns None when anything else differs (operands, statements, literals,
+    other operators), so the caller keeps the ordinary selection.
+    """
+    sites = []
+    pending = [(before, after)]
+    while pending:
+        old, new = pending.pop()
+        if old is new:
+            continue
+        if type(old) is not type(new):
+            return None
+        if isinstance(old, ast.AST):
+            skip = False
+            if isinstance(old, ast.Compare) and len(old.ops) == len(new.ops) == 1 and type(old.ops[0]) is not type(new.ops[0]):
+                if frozenset((type(old.ops[0]), type(new.ops[0]))) not in _SWAPS or id(old) not in keys:
+                    return None
+                sites.append((keys[id(old)], old))
+                skip = True
+            for field in old._fields:
+                if not (skip and field == "ops"):
+                    pending.append((getattr(old, field, None), getattr(new, field, None)))
+        elif isinstance(old, list):
+            if len(old) != len(new):
+                return None
+            pending.extend(zip(old, new))
+        elif old != new:
+            return None
+    return sites or None

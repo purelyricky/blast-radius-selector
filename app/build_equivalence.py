@@ -37,13 +37,34 @@ def main():
     os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     os.chdir(work)
     import pytest
-    code = pytest.main(["tests", "-q", "--tb=short", "-p", "no:cacheprovider"])
+
+    failures = set()
+
+    class Context:
+        def pytest_runtest_logreport(self, report):
+            if report.failed:
+                failures.add(report.nodeid)
+
+        def pytest_runtest_setup(self, item):
+            probe.current = "scope:" + item.parent.nodeid
+
+        def pytest_runtest_call(self, item):
+            probe.current = item.nodeid
+
+        def pytest_runtest_teardown(self, item):
+            probe.current = "scope:" + item.parent.nodeid
+
+    code = pytest.main(["tests", "-q", "--tb=short", "-p", "no:cacheprovider"], plugins=[Context()])
+    # test_lazy_load inspects module loading, which the instrumentation legitimately changes.
+    unexpected = {f for f in failures if not f.endswith("TestDialect::test_lazy_load")}
+    if unexpected:
+        raise SystemExit(f"baseline tests failed under instrumentation: {sorted(unexpected)[:5]}")
     if int(code) not in (0, 1):
         raise SystemExit(f"baseline suite failed under instrumentation: exit {int(code)}")
-    out = {"revision": "eb11aec4be8cb2122afe713a4816662c3f0fb2fa", "sites": total, "observed": len(probe.seen), "proven": probe.proven()}
+    out = {"revision": "eb11aec4be8cb2122afe713a4816662c3f0fb2fa", "sites": total, "observed": len(probe.seen), "proven": probe.proven(), "differ": {key: sorted(tests) for key, tests in probe.differ.items()}}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(out, separators=(",", ":")), encoding="utf-8")
-    print(f"sites={total} observed={len(probe.seen)} proven={len(out['proven'])} {time.monotonic()-started:.0f}s", file=sys.stderr)
+    print(f"sites={total} observed={len(probe.seen)} proven={len(out['proven'])} differ_sites={len(out['differ'])} {time.monotonic()-started:.0f}s", file=sys.stderr)
 
 
 if __name__ == "__main__":
