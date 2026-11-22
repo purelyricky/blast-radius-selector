@@ -23,6 +23,10 @@ def shape(value):
     return type(value)
 
 
+def same_dict_keys(before, after):
+    return isinstance(before, dict) and isinstance(after, dict) and [(type(key), repr(key)) for key in before] == [(type(key), repr(key)) for key in after]
+
+
 def parents_for(node):
     return {id(child): parent for parent in ast.walk(node) for child in ast.iter_child_nodes(parent)}
 
@@ -165,10 +169,10 @@ class SharedRefiner:
         for access in accesses:
             if isinstance(access, ast.Call) and access.func.id == "hasattr":
                 continue
-            if isinstance(old_value, dict) and self._keys_only(access, parents):
+            if same_dict_keys(old_value, new_value) and self._keys_only(access, parents):
                 continue
             parent = parents.get(id(access))
-            if isinstance(old_value, dict) and isinstance(parent, ast.Assign) and parent.value is access and len(parent.targets) == 1 and isinstance(parent.targets[0], ast.Name):
+            if same_dict_keys(old_value, new_value) and isinstance(parent, ast.Assign) and parent.value is access and len(parent.targets) == 1 and isinstance(parent.targets[0], ast.Name):
                 alias = parent.targets[0].id
                 uses = [node for node in ast.walk(scope) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id == alias]
                 if uses and all(self._keys_only(use, parents) for use in uses):
@@ -221,8 +225,8 @@ class SharedRefiner:
         if field.startswith("__") or class_node.decorator_list:
             raise UnsafeValue("special or decorated class semantics")
         old_value, new_value = ast.literal_eval(old.value), ast.literal_eval(new.value)
-        if shape(old_value) != shape(new_value):
-            raise UnsafeValue("literal type or container keys changed")
+        # Both literal constructors are non-raising. Shape changes are safe
+        # only if the eager-reader analysis below accepts the resulting flow.
         # Class-local reads bypass attribute lookup and can eagerly derive
         # other fields; retain the broad fallback for those definitions.
         for statement in class_node.body:

@@ -22,11 +22,11 @@ class SharedValues(unittest.TestCase):
         self.assertEqual(ast.dump(result), ast.dump(ast.parse(old)))
         self.assertEqual(selected, {0})
 
-    def test_type_and_key_changes_stay_broad(self):
+    def test_literal_shapes_can_change_without_eager_readers(self):
         for old, new in [("class C:\n X=True\n", "class C:\n X=1\n"), ("class C:\n X={'a':1}\n", "class C:\n X={'b':1}\n")]:
             result, selected = self.refine(old, new)
-            self.assertEqual(ast.dump(result), ast.dump(ast.parse(new)))
-            self.assertEqual(selected, set())
+            self.assertEqual(ast.dump(result), ast.dump(ast.parse(old)))
+            self.assertEqual(selected, {0})
 
     def test_unobserved_metaclass_stays_broad(self):
         old = "class C:\n X=1\n"
@@ -44,6 +44,14 @@ class SharedValues(unittest.TestCase):
         result, _ = self.refine(old, new, metadata)
         self.assertEqual(ast.dump(result), ast.dump(ast.parse(new)))
 
+    def test_dictionary_membership_change_stays_broad(self):
+        old = "def init(cls):\n if 'a' in cls.X: cls.Y=1\nclass C:\n X={'a':1}\n"
+        metadata = self.metadata()
+        metadata["imports"] = {KEY + "::X": [[PATH, 1, "init"]]}
+        new = old.replace("{'a':1}", "{'b':1}")
+        result, _ = self.refine(old, new, metadata)
+        self.assertEqual(ast.dump(result), ast.dump(ast.parse(new)))
+
     def test_key_only_import_flow_is_safe(self):
         old = "def init(cls):\n d=cls.X\n if 'a' in d:\n  cls.Y=True\nclass C:\n X={'a':1}\n"
         metadata = self.metadata()
@@ -58,6 +66,15 @@ class SharedValues(unittest.TestCase):
         metadata["imports"] = {KEY + "::X": [[PATH, 1, "init"]]}
         metadata["fields"][KEY + "::REQUIRED"] = [1]
         result, selected = self.refine(old, old.replace("'b':False", "'b':True"), metadata)
+        self.assertEqual(ast.dump(result), ast.dump(ast.parse(old)))
+        self.assertEqual(selected, {0, 1})
+
+    def test_added_dictionary_entry_has_derived_readers(self):
+        old = "def init(cls):\n cls.REQUIRED={k for k,v in cls.X.items() if v}\nclass C:\n X={'a':True}\n"
+        metadata = self.metadata()
+        metadata["imports"] = {KEY + "::X": [[PATH, 1, "init"]]}
+        metadata["fields"][KEY + "::REQUIRED"] = [1]
+        result, selected = self.refine(old, old.replace("{'a':True}", "{'a':True,'b':True}"), metadata)
         self.assertEqual(ast.dump(result), ast.dump(ast.parse(old)))
         self.assertEqual(selected, {0, 1})
 

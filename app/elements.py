@@ -8,6 +8,7 @@ baseline consumers, while retaining full fallback for other eager effects.
 import ast
 import copy
 from functools import lru_cache
+from package_changes import generator_kind
 
 
 class UnsupportedElement(ValueError):
@@ -116,7 +117,7 @@ class ElementRefiner:
         target_path, factory = self.resolve_factory(path, old.func)
         return [(target_path, node) for node in self.returned_callables(target_path, factory)]
 
-    def _deferred_statement(self, path, before, after, blocked_names=()):
+    def _deferred_statement(self, path, before, after, blocked_names=(), allow_factories=True):
         regions = []
         def compare(old, new):
             if isinstance(old, ast.AST) and isinstance(new, ast.AST):
@@ -125,11 +126,11 @@ class ElementRefiner:
                 if type(old) is not type(new):
                     raise UnsupportedElement("changed eager statement shape")
                 if isinstance(old, ast.Lambda):
-                    if dump(old.args) != dump(new.args) or self.imported_callable(path, old):
+                    if dump(old.args) != dump(new.args) or self.imported_callable(path, old) or generator_kind(old) != generator_kind(new):
                         raise UnsupportedElement("lambda header or import effects")
                     regions.append((path, old))
                     return
-                if isinstance(old, ast.Call):
+                if isinstance(old, ast.Call) and allow_factories:
                     regions.extend(self._deferred_call(path, old, new, blocked_names))
                     return
                 for field in old._fields:
@@ -149,7 +150,7 @@ class ElementRefiner:
     def normalize(self, path, before, after):
         """Return AST with recognized deferred edits reverted, plus consumers."""
         regions = []
-        def compare(old_body, new_body, in_class=False):
+        def compare(old_body, new_body, in_class=False, in_function=False):
             if len(old_body) != len(new_body):
                 return new_body
             replacements = {}
@@ -166,14 +167,20 @@ class ElementRefiner:
                 if dump(old) == dump(new):
                     continue
                 if isinstance(old, ast.ClassDef) and isinstance(new, ast.ClassDef):
-                    body = compare(old.body, new.body, in_class=True)
+                    body = compare(old.body, new.body, in_class=True, in_function=in_function)
                     if body is not new.body:
                         replacement = copy.copy(new)
                         replacement.body = body
                         replacements[index] = replacement
-                elif not isinstance(old, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                elif isinstance(old, (ast.FunctionDef, ast.AsyncFunctionDef)) and type(old) is type(new):
+                    body = compare(old.body, new.body, in_function=True)
+                    if body is not new.body:
+                        replacement = copy.copy(new)
+                        replacement.body = body
+                        replacements[index] = replacement
+                else:
                     try:
-                        found = self._deferred_statement(path, old, new, blocked)
+                        found = self._deferred_statement(path, old, new, blocked, allow_factories=not in_function)
                     except UnsupportedElement:
                         continue
                     replacements[index] = old

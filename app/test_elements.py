@@ -69,6 +69,26 @@ class DeferredElements(unittest.TestCase):
             self.assertEqual(len(regions), 1)
             self.assertEqual(snapshots, (ast.dump(before, include_attributes=True), ast.dump(after, include_attributes=True)))
 
+    def test_lambda_inside_factory_body_is_deferred(self):
+        old = "def make(x):\n return lambda y:x+y+1\n"
+        new = old.replace("y+1", "y+2")
+        result, regions = self.refiner(old).normalize("sqlglot/example.py", ast.parse(old), ast.parse(new))
+        self.assertEqual(ast.dump(result), ast.dump(ast.parse(old)))
+        self.assertEqual(len(regions), 1)
+
+    def test_function_parameter_cannot_be_resolved_as_global_factory(self):
+        old = "def build(x):\n return lambda: x\ndef invoke(build):\n return build(1)\n"
+        new = old.replace("build(1)", "build(2)")
+        result, regions = self.refiner(old).normalize("sqlglot/example.py", ast.parse(old), ast.parse(new))
+        self.assertEqual(ast.dump(result), ast.dump(ast.parse(new)))
+        self.assertEqual(regions, [])
+
+    def test_lambda_generator_kind_is_not_normalized(self):
+        old, new = "F=lambda:(yield 1)\n", "F=lambda:1\n"
+        result, regions = self.refiner(old).normalize("sqlglot/example.py", ast.parse(old), ast.parse(new))
+        self.assertEqual(ast.dump(result), ast.dump(ast.parse(new)))
+        self.assertEqual(regions, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,7 @@ from compare_equivalence import equivalent_edits
 from equivalence import site_keys
 from family import change_ok, docstring_only, header_default_changes, known_names
 from patches import InvalidPatch, apply_patch, parse_patch
+from package_changes import body_only as package_body_only, generator_kind, nested_body_only, region_imported
 
 
 _INERT = re.compile(r"^(docs/.*|\.github/.*|posts/.*|[^/]*\.(md|rst)|LICENSE|CHANGELOG[^/]*)$")
@@ -87,6 +88,8 @@ def changed_functions(before, after, pairs=False):
                     raise BroadChange("function header changed")
                 if ast.get_docstring(old, clean=False) != ast.get_docstring(new, clean=False):
                     raise BroadChange("function metadata changed")
+                if generator_kind(old) != generator_kind(new):
+                    raise BroadChange("callable generator kind changed")
                 if any(isinstance(node, (ast.Global, ast.Nonlocal)) for node in ast.walk(new)):
                     raise BroadChange("function can alter shared lexical state")
                 result.append((old, new) if pairs else old)
@@ -119,6 +122,9 @@ def body_regions(before, after):
                 continue
             if type(old) is not type(new):
                 regions.append(old)
+                continue
+            if nested_body_only(old, new):
+                regions.extend(body_regions(old, new))
                 continue
             if isinstance(old, (ast.If, ast.While, ast.For, ast.AsyncFor, ast.With, ast.AsyncWith)):
                 old_header, new_header = copy.copy(old), copy.copy(new)
@@ -172,6 +178,12 @@ class DependencySelector:
         self.always = self.all_numbers - set(self.numbers)
         self.always.update(self._numbers(self.map.get("always", [])))
         self.source_trees = {}
+        self.import_lines = self.map.get("import_lines", {})
+        execution_path = Path(map_path).with_name("import_execution.json")
+        if execution_path.exists():
+            execution = json.loads(execution_path.read_text(encoding="utf-8"))
+            if execution.get("revision") == self.map["revision"]:
+                self.import_lines = {path: sorted(set(self.import_lines.get(path, [])) | set(execution["lines"].get(path, []))) for path in self.map["sources"]}
         self.function_tests = {}
         self.last_reason = ""
         self.refiner = None
@@ -324,7 +336,7 @@ class DependencySelector:
             scopes = 0
             for patch in patches:
                 path = patch.old
-                if patch.new != path or path.endswith(("/__init__.py", "/conftest.py")) or path in ("conftest.py", "tests/helpers.py"):
+                if patch.new != path or path.endswith("/conftest.py") or path in ("conftest.py", "tests/helpers.py"):
                     raise BroadChange("global setup, package initializer, or renamed file")
                 if path in self.map["reads"]:
                     selected.update(self._numbers(self._indices(self.map["reads"][path])))
@@ -342,6 +354,8 @@ class DependencySelector:
                 if before is None:
                     before = ast.parse(source, filename=path)
                     self.source_trees[path] = before
+                if path.endswith("/__init__.py") and not package_body_only(before, after):
+                    raise BroadChange("package initializer has eager or structural changes")
                 if path.startswith("tests/"):
                     selected.update(self.by_file.get(path, self.all_numbers))
                     continue
@@ -375,11 +389,10 @@ class DependencySelector:
                     selected.update(self._function_tests(region_path, region))
                 scopes += len(deferred)
                 for node, new_node in functions:
-                    body_start = node.body[0].lineno
-                    if any(body_start <= line <= node.end_lineno for line in self.map.get("import_lines", {}).get(path, [])):
-                        raise BroadChange("changed function executes during module import")
                     regions = body_regions(node, new_node) if self.precision == "statement" else [node]
                     for region in regions:
+                        if region_imported(node, region, self.import_lines.get(path, [])):
+                            raise BroadChange("changed region executes during module import")
                         selected.update(self._function_tests(path, region))
                 scopes += len(functions)
             self.last_reason = f"coverage of {scopes} changed function scopes and fixture readers"

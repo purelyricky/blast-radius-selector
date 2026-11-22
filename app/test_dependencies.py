@@ -53,6 +53,14 @@ class PatchSafety(unittest.TestCase):
         with self.assertRaises(BroadChange):
             changed_functions(ast.parse("x=1"), ast.parse("x=2"))
 
+    def test_callable_generator_kind_changes_stay_broad(self):
+        old = ast.parse("def f():\n yield 1\n")
+        new = ast.parse("def f():\n return 1\n")
+        with self.assertRaises(BroadChange):
+            changed_functions(old, new)
+        with self.assertRaises(BroadChange):
+            changed_functions(new, old)
+
     def test_stable_branch_narrows_to_return(self):
         old = ast.parse("def f(x):\n if x:\n  return 1\n return 2\n").body[0]
         new = ast.parse("def f(x):\n if x:\n  return 3\n return 2\n").body[0]
@@ -67,6 +75,11 @@ class PatchSafety(unittest.TestCase):
         old = ast.parse("def f(x):\n return x\n").body[0]
         new = ast.parse("def f(x):\n x+=1\n return x\n").body[0]
         self.assertIs(body_regions(old, new)[0], old)
+
+    def test_nested_closure_body_uses_executed_body_region(self):
+        old = ast.parse("def factory():\n def inner(x):\n  return x+1\n return inner\n").body[0]
+        new = ast.parse("def factory():\n def inner(x):\n  return x+2\n return inner\n").body[0]
+        self.assertEqual([node.lineno for node in body_regions(old, new)], [3])
 
 
 class SelectionSafety(unittest.TestCase):
