@@ -1,12 +1,44 @@
 import ast
+import datetime
+import enum
 import random
 import unittest
 
-from build_predicate_values import Recorder, Rewrite, merge
+from build_predicate_values import Recorder, Rewrite, merge, pure_value, relation_bit
 from predicate_values import OPS, PredicateRefiner, changed_comparisons, fingerprint, unchanged
 
 
 class PredicateTests(unittest.TestCase):
+    def test_safe_containers_dates_and_partial_order(self):
+        self.assertEqual(relation_bit((1,2),(1,3)),1)
+        self.assertEqual(relation_bit([1,2],[1,2]),2)
+        self.assertEqual(relation_bit({1},{1,2}),1)
+        self.assertEqual(relation_bit({1},{2}),8)
+        self.assertTrue(unchanged(['r',8],('lt',2,None),('le',2,None)))
+        self.assertFalse(unchanged(['r',8],('eq',2,None),('ne',2,None)))
+        self.assertIsNone(relation_bit(None,None))
+        self.assertIsNone(relation_bit((1,'x'),(1,2)))
+        self.assertEqual(relation_bit(datetime.date(2020,1,1),datetime.date(2020,1,2)),1)
+
+    def test_custom_callbacks_and_large_graphs_are_not_observed(self):
+        class LoudMeta(type):
+            def __eq__(self,other):
+                raise AssertionError('type checks must use identity')
+        class Loud(metaclass=LoudMeta):
+            @property
+            def __class__(self):
+                raise AssertionError('class property must not be read')
+        self.assertFalse(pure_value(Loud()))
+        class Sneaky(int):
+            def __lt__(self,other):
+                raise AssertionError('custom comparison must not run')
+        self.assertFalse(pure_value([Sneaky(1)]))
+        self.assertIsNone(relation_bit([Sneaky(1)],[Sneaky(2)]))
+        self.assertFalse(pure_value(list(range(200))))
+        self.assertFalse(pure_value([float('nan')]))
+        class Plain(enum.Enum):
+            A=1
+        self.assertTrue(pure_value({Plain.A}))
     def test_variable_relations_are_sufficient_for_operator_swaps(self):
         self.assertTrue(unchanged(['r', 1 | 4], ('lt',2,None), ('le',2,None)))
         self.assertFalse(unchanged(['r', 1 | 2 | 4], ('lt',2,None), ('le',2,None)))
@@ -56,8 +88,10 @@ class PredicateTests(unittest.TestCase):
         self.assertIsNone(changed_comparisons(old, ast.parse('def f(x):\n return x <= 5\nz=1\n'), 'x.py'))
 
     def test_import_and_unsafe_contexts(self):
-        metadata = {'version': 1, 'revision': 'r', 'ids': ['a','b'], 'groups': [['n',0,2], ['n',4,4]], 'sites': {'x.py:2:8': {'tests': [[0,0],[1,1]], 'import': 0}}, 'unsafe': [0]}
+        metadata = {'version': 2, 'revision': 'r', 'ids': ['a','b'], 'groups': [['n',0,2], ['n',4,4]], 'sites': {'x.py:2:8': {'tests': [[0,0],[1,1]], 'import': 0}}, 'unsafe': [0]}
         refiner = PredicateRefiner(metadata, 'r', ['a','b'])
+        with self.assertRaises(ValueError):
+            PredicateRefiner(dict(metadata,version=1), 'r', ['a','b'])
         before, after = ast.parse('def f(x):\n return x < 4'), ast.parse('def f(x):\n return x <= 4')
         self.assertEqual(refiner.select(before, after, 'x.py'), {0,1})
         self.assertEqual(refiner.select(before, after, 'x.py', coverage=lambda node: []), {1})

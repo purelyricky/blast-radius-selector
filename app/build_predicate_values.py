@@ -3,6 +3,8 @@ import argparse
 import ast
 import builtins
 import concurrent.futures
+import datetime
+import enum
 import gzip
 import importlib
 import importlib.abc
@@ -16,6 +18,48 @@ import tracemalloc
 
 from build_map import InstrumentedExecutor, PINNED, module_name
 from predicate_values import OPS, description, fingerprint, site_key
+
+
+def pure_value(value, budget=None):
+    """Bounded built-in graphs; no user comparison/hash/timezone callbacks."""
+    if budget is None:
+        budget = [128]
+    budget[0] -= 1
+    if budget[0] < 0:
+        return False
+    kind = type(value)
+    if any(kind is item for item in (bool, int, str, bytes, type(None))):
+        return kind is not int or value.bit_length() <= 512
+    if kind is float:
+        return math.isfinite(value)
+    if kind is complex:
+        return math.isfinite(value.real) and math.isfinite(value.imag)
+    if any(kind is item for item in (tuple, list, set, frozenset)):
+        return all(pure_value(item, budget) for item in value)
+    if kind is datetime.date or kind is datetime.timedelta:
+        return True
+    if kind is datetime.datetime:
+        return value.tzinfo is None or type(value.tzinfo) is datetime.timezone
+    if type(kind) is enum.EnumMeta:
+        eq = type.__getattribute__(kind, '__eq__')
+        ne = type.__getattribute__(kind, '__ne__')
+        hash_ = type.__getattribute__(kind, '__hash__')
+        get = type.__getattribute__(kind, '__getattribute__')
+        return any(eq is item for item in (object.__eq__, str.__eq__, int.__eq__)) and any(ne is item for item in (object.__ne__, str.__ne__, int.__ne__)) and any(hash_ is item for item in (enum.Enum.__hash__, object.__hash__, str.__hash__, int.__hash__)) and get is object.__getattribute__ and type(object.__getattribute__(value, '_name_')) is str
+    return False
+
+
+def relation_bit(left, right):
+    if not pure_value(left) or not pure_value(right):
+        return None
+    try:
+        values = tuple(function(left, right) for function in OPS.values())
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not all(type(value) is bool for value in values):
+        return None
+    patterns = ((False, True, True, True, False, False), (True, False, False, True, False, True), (False, True, False, False, True, True), (False, True, False, False, False, False))
+    return 1 << patterns.index(values) if values in patterns else None
 
 
 class Rewrite(ast.NodeTransformer):
@@ -81,7 +125,7 @@ class Recorder:
                 if state is None or state[0] != '?':
                     kind = type(value)
                     def numeric(item):
-                        return type(item) in (int, bool) and int(item).bit_length() <= 512 or type(item) is float and math.isfinite(item)
+                        return (type(item) is int or type(item) is bool) and int(item).bit_length() <= 512 or type(item) is float and math.isfinite(item)
                     if side == 2:
                         if numeric(left) and numeric(right) or type(left) is str and type(right) is str:
                             relation = 0 if left == right else -1 if left < right else 1
@@ -93,7 +137,13 @@ class Recorder:
                             else:
                                 self.states[marker] = ['?']
                         else:
-                            self.states[marker] = ['?']
+                            bit = relation_bit(left, right)
+                            if bit is None or state is not None and state[0] != 'r':
+                                self.states[marker] = ['?']
+                            elif state is None:
+                                self.states[marker] = ['r', bit]
+                            else:
+                                state[1] |= bit
                     elif numeric(value):
                         if state is None:
                             self.states[marker] = ['n', value, value]
@@ -235,7 +285,7 @@ def main():
             site['import'] = intern(site['import'])
         if '' in recorder.unsafe:
             site['import'] = intern(['?'])
-    payload = {'version': 1, 'revision': PINNED, 'ids': ids, 'groups': groups, 'sites': profiles, 'unsafe': sorted({n for context in recorder.unsafe if context for n in expand(context)})}
+    payload = {'version': 2, 'revision': PINNED, 'ids': ids, 'groups': groups, 'sites': profiles, 'unsafe': sorted({n for context in recorder.unsafe if context for n in expand(context)})}
     output.parent.mkdir(parents=True, exist_ok=True)
     opener = gzip.open if output.suffix == '.gz' else open
     with opener(output, 'wt', encoding='utf-8') as stream:

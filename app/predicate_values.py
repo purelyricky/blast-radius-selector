@@ -57,7 +57,9 @@ def unchanged(state, old, new):
     if side != new_side:
         return False
     if state[0] == 'r' and side == 2:
-        return all(OPS[old_op](relation, 0) == OPS[new_op](relation, 0) for n, relation in enumerate((-1, 0, 1)) if state[1] & (1 << n))
+        def outcome(op, relation):
+            return op == 'ne' if relation is None else OPS[op](relation, 0)
+        return all(outcome(old_op, relation) == outcome(new_op, relation) for n, relation in enumerate((-1, 0, 1, None)) if state[1] & (1 << n))
     def result(op, constant, value):
         return OPS[op](constant, value) if side == 0 else OPS[op](value, constant)
     if state[0] == 'n' and type(old_constant) in (int, bool, float) and type(new_constant) in (int, bool, float):
@@ -105,7 +107,7 @@ def changed_comparisons(before, after, path):
 
 class PredicateRefiner:
     def __init__(self, metadata, revision, ids):
-        if metadata.get('version') != 1 or metadata.get('revision') != revision or metadata.get('ids') != ids:
+        if metadata.get('version') != 2 or metadata.get('revision') != revision or metadata.get('ids') != ids:
             raise ValueError('predicate metadata differs from baseline')
         self.metadata = metadata
 
