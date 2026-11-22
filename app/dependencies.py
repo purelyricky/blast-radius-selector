@@ -235,6 +235,10 @@ class DependencySelector:
             self.function_tests[key] = self._numbers(indices)
         return self.function_tests[key]
 
+    def _coverage_indices(self, path, node):
+        lines = self.map['lines'].get(path, {})
+        return {index for number in range(node.lineno, node.end_lineno + 1) if str(number) in lines for index in self._indices(lines[str(number)])}
+
     def _with_readers(self, patch_text, selected):
         """Add tests that read the patched file as data (e.g. TestTyping inspects code constants)."""
         for patch in parse_patch(patch_text):
@@ -456,7 +460,7 @@ class DependencySelector:
                     if equivalent_edits(before, after, path, self.proven_sites, self.equivalence_keys[path]):
                         continue
                 if self.predicate_refiner is not None and len(patches) == 1 and _PREDICATE.search(patch_text):
-                    indices = self.predicate_refiner.select(before, after, path)
+                    indices = self.predicate_refiner.select(before, after, path, coverage=lambda node: self._coverage_indices(path, node))
                     if indices is not None:
                         selected.update(self._numbers(indices))
                         scopes += 1

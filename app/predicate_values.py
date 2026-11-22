@@ -32,7 +32,9 @@ def description(node):
     if not isinstance(node, ast.Compare) or len(node.ops) != 1 or type(node.ops[0]) not in NAMES:
         return None
     left, right = literal(node.left), literal(node.comparators[0])
-    if (left is None) == (right is None):
+    if left is None and right is None:
+        return NAMES[type(node.ops[0])], 2, None
+    if left is not None and right is not None:
         return None
     side = 0 if left is not None else 1
     return NAMES[type(node.ops[0])], side, left if side == 0 else right
@@ -54,6 +56,8 @@ def unchanged(state, old, new):
     new_op, new_side, new_constant = new
     if side != new_side:
         return False
+    if state[0] == 'r' and side == 2:
+        return all(OPS[old_op](relation, 0) == OPS[new_op](relation, 0) for n, relation in enumerate((-1, 0, 1)) if state[1] & (1 << n))
     def result(op, constant, value):
         return OPS[op](constant, value) if side == 0 else OPS[op](value, constant)
     if state[0] == 'n' and type(old_constant) in (int, bool, float) and type(new_constant) in (int, bool, float):
@@ -62,13 +66,15 @@ def unchanged(state, old, new):
         points = sorted({low, high} | {x for x in (old_constant, new_constant) if low <= x <= high})
         probes = points + [(a+b)/2 for a, b in zip(points, points[1:])]
         return all(result(old_op, old_constant, value) == result(new_op, new_constant, value) for value in probes)
-    if state[0] == 's' and type(old_constant) is str and type(new_constant) is str and old_op in ('eq', 'ne') and new_op in ('eq', 'ne'):
+    if state[0] == 's' and type(old_constant) is str and type(new_constant) is str:
         # A hash collision can only add a potential match, so cannot cause an
         # unsafe exclusion. Presence is deliberately treated as uncertain.
         observed = state[1]
         if fingerprint(old_constant) in observed or fingerprint(new_constant) in observed:
             return False
-        return old_op == new_op
+        if old_op in ('eq', 'ne') and new_op in ('eq', 'ne'):
+            return old_op == new_op
+        return old_constant == new_constant and frozenset((old_op, new_op)) in (frozenset(('lt', 'le')), frozenset(('gt', 'ge')))
     return False
 
 
@@ -84,11 +90,11 @@ def changed_comparisons(before, after, path):
                 old, new = description(a), description(b)
                 if old is None or new is None or old[1] != new[1]:
                     return False
-                old_dynamic = a.comparators[0] if old[1] == 0 else a.left
-                new_dynamic = b.comparators[0] if new[1] == 0 else b.left
-                if ast.dump(old_dynamic, include_attributes=False) != ast.dump(new_dynamic, include_attributes=False):
+                old_dynamic = [a.left, a.comparators[0]] if old[1] == 2 else [a.comparators[0] if old[1] == 0 else a.left]
+                new_dynamic = [b.left, b.comparators[0]] if new[1] == 2 else [b.comparators[0] if new[1] == 0 else b.left]
+                if any(ast.dump(x, include_attributes=False) != ast.dump(y, include_attributes=False) for x, y in zip(old_dynamic, new_dynamic)):
                     return False
-                changes.append((site_key(path, a), old, new))
+                changes.append((site_key(path, a), old, new, a))
                 return True
             return all(equal(getattr(a, field), getattr(b, field)) for field in a._fields)
         if isinstance(a, list) and isinstance(b, list):
@@ -103,13 +109,16 @@ class PredicateRefiner:
             raise ValueError('predicate metadata differs from baseline')
         self.metadata = metadata
 
-    def select(self, before, after, path):
+    def select(self, before, after, path, coverage=None):
         changes = changed_comparisons(before, after, path)
         if changes is None:
             return None
-        selected = set(self.metadata.get('unsafe', []))
+        selected = set()
+        unsafe = set(self.metadata.get('unsafe', []))
         groups = self.metadata['groups']
-        for key, old, new in changes:
+        for key, old, new, node in changes:
+            if unsafe:
+                selected.update(unsafe if coverage is None else unsafe.intersection(coverage(node)))
             site = self.metadata['sites'].get(key)
             if site is None:
                 return None

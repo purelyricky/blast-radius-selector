@@ -80,7 +80,21 @@ class Recorder:
                 state = self.states.get(marker)
                 if state is None or state[0] != '?':
                     kind = type(value)
-                    if kind in (int, bool) and int(value).bit_length() <= 512 or kind is float and math.isfinite(value):
+                    def numeric(item):
+                        return type(item) in (int, bool) and int(item).bit_length() <= 512 or type(item) is float and math.isfinite(item)
+                    if side == 2:
+                        if numeric(left) and numeric(right) or type(left) is str and type(right) is str:
+                            relation = 0 if left == right else -1 if left < right else 1
+                            bit = 1 << (relation + 1)
+                            if state is None:
+                                self.states[marker] = ['r', bit]
+                            elif state[0] == 'r':
+                                state[1] |= bit
+                            else:
+                                self.states[marker] = ['?']
+                        else:
+                            self.states[marker] = ['?']
+                    elif numeric(value):
                         if state is None:
                             self.states[marker] = ['n', value, value]
                         elif state[0] != 'n':
@@ -162,6 +176,8 @@ def merge(a, b):
         return ['?']
     if a[0] == 'n':
         return ['n', min(a[1], b[1]), max(a[2], b[2])]
+    if a[0] == 'r':
+        return ['r', a[1] | b[1]]
     values = set(a[1]) | set(b[1])
     return ['s', sorted(values)] if len(values) <= 5000 else ['?']
 

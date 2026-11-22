@@ -7,6 +7,15 @@ from predicate_values import OPS, PredicateRefiner, changed_comparisons, fingerp
 
 
 class PredicateTests(unittest.TestCase):
+    def test_variable_relations_are_sufficient_for_operator_swaps(self):
+        self.assertTrue(unchanged(['r', 1 | 4], ('lt',2,None), ('le',2,None)))
+        self.assertFalse(unchanged(['r', 1 | 2 | 4], ('lt',2,None), ('le',2,None)))
+        self.assertTrue(unchanged(['r', 2], ('eq',2,None), ('ge',2,None)))
+        self.assertIsNone(changed_comparisons(ast.parse('x < y'), ast.parse('x <= z'), 'x.py'))
+        recorder = Recorder()
+        self.assertTrue(recorder.compare('rel','lt',2,1,2))
+        self.assertFalse(recorder.compare('rel','lt',2,2,1))
+        self.assertEqual(recorder.states[('rel','')], ['r',5])
     def test_numeric_bounds_cover_interior_boundaries(self):
         self.assertFalse(unchanged(['n', 0, 10], ('lt', 1, 4), ('lt', 1, 5)))
         self.assertTrue(unchanged(['n', 0, 3], ('lt', 1, 4), ('lt', 1, 5)))
@@ -36,6 +45,9 @@ class PredicateTests(unittest.TestCase):
         self.assertFalse(unchanged(state, ('eq', 1, 'seen'), ('eq', 1, 'absent')))
         self.assertFalse(unchanged(state, ('eq', 1, 'absent'), ('ne', 1, 'also absent')))
         self.assertFalse(unchanged(['?'], ('eq', 1, 'x'), ('eq', 1, 'y')))
+        self.assertTrue(unchanged(state, ('lt', 1, 'absent'), ('le', 1, 'absent')))
+        self.assertFalse(unchanged(state, ('lt', 1, 'seen'), ('le', 1, 'seen')))
+        self.assertFalse(unchanged(state, ('lt', 1, 'absent'), ('le', 1, 'other')))
 
     def test_unchanged_operand_and_whole_module_required(self):
         old = ast.parse('def f(x):\n return x < 4\n')
@@ -48,6 +60,7 @@ class PredicateTests(unittest.TestCase):
         refiner = PredicateRefiner(metadata, 'r', ['a','b'])
         before, after = ast.parse('def f(x):\n return x < 4'), ast.parse('def f(x):\n return x <= 4')
         self.assertEqual(refiner.select(before, after, 'x.py'), {0,1})
+        self.assertEqual(refiner.select(before, after, 'x.py', coverage=lambda node: []), {1})
         metadata['sites']['x.py:2:8']['import'] = 1
         self.assertIsNone(refiner.select(before, after, 'x.py'))
 
