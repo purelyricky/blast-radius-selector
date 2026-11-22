@@ -109,6 +109,17 @@ class SelectionSafety(unittest.TestCase):
         text = "--- a/tests/fixtures/data.sql\n+++ b/tests/fixtures/data.sql\n@@ -1 +1 @@\n-SELECT 1;\n+SELECT 2;\n"
         self.assertEqual(self.selector().select(text), {17})
 
+    def test_equivalence_applies_only_without_other_ast_edits(self):
+        self.source = "def f(x):\n if x is None:\n  return 1\n return 2\n"
+        self.data["sources"]["sqlglot/example.py"] = self.source
+        eq = {"revision": self.data["revision"], "proven": ["sqlglot/example.py::f::0"]}
+        (self.path.parent / "eq_sites.json").write_text(json.dumps(eq), encoding="utf-8")
+        selector = self.selector()
+        equivalent = self.source.replace("x is None", "x == None")
+        self.assertEqual(selector.select(patch(self.source, equivalent)), set())
+        mixed = equivalent.replace("return 1", "return 3")
+        self.assertEqual(selector.select(patch(self.source, mixed)), {17, 91})
+
 
 if __name__ == "__main__":
     unittest.main()

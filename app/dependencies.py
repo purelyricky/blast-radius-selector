@@ -172,6 +172,13 @@ class DependencySelector:
         self.function_tests = {}
         self.last_reason = ""
         self.refiner = None
+        self.shared_refiner = None
+        self.shared_metadata = None
+        shared_path = Path(map_path).with_name("shared_reads.json")
+        if shared_path.exists():
+            shared = json.loads(shared_path.read_text(encoding="utf-8"))
+            if shared.get("version") == 2 and shared.get("revision") == self.map["revision"] and shared.get("ids") == self.map["ids"]:
+                self.shared_metadata = shared
         self.proven_sites = frozenset()
         eq_path = Path(map_path).with_name("eq_sites.json")
         if eq_path.exists():
@@ -296,7 +303,17 @@ class DependencySelector:
                         from elements import ElementRefiner
                         self.refiner = ElementRefiner(self.map)
                     normalized, deferred = self.refiner.normalize(path, before, after)
-                    functions = changed_functions(before, normalized, pairs=True)
+                    try:
+                        functions = changed_functions(before, normalized, pairs=True)
+                    except BroadChange:
+                        if self.shared_metadata is None:
+                            raise
+                        if self.shared_refiner is None:
+                            from shared import SharedRefiner
+                            self.shared_refiner = SharedRefiner(self.map["sources"], self.shared_metadata)
+                        normalized, shared_indices = self.shared_refiner.normalize(path, before, normalized)
+                        functions = changed_functions(before, normalized, pairs=True)
+                        selected.update(self._numbers(shared_indices))
                 for region_path, region in deferred:
                     selected.update(self._function_tests(region_path, region))
                 scopes += len(deferred)
