@@ -135,6 +135,7 @@ def main():
     parser.add_argument("--coverage", type=Path, default=Path("artifacts/.coverage"))
     parser.add_argument("--reuse", action="store_true", help="reuse completed coverage and recorder files")
     parser.add_argument("--real-workers", action="store_true", help="diagnostic only: do not trace child-process computations inline")
+    parser.add_argument("--import-calls", type=Path, help="optional metadata from build_imports.py")
     args = parser.parse_args()
     root = args.source.resolve()
     output = args.output.resolve()
@@ -219,6 +220,8 @@ def main():
     lines = {path: {line: intern(tests) for line, tests in file_lines.items()} for path, file_lines in lines.items()}
     reads = {path: intern(tests) for path, tests in reads.items()}
     result = {"version": 2, "revision": PINNED, "ids": ids, "always": [index[nodeid] for nodeid in recorded["failed"]], "sources": sources, "imports": imports, "groups": groups, "lines": lines, "import_lines": import_lines, "reads": reads}
+    if args.import_calls:
+        result["import_calls"] = json.loads(args.import_calls.read_text(encoding="utf-8"))
     output.parent.mkdir(parents=True, exist_ok=True)
     opener = gzip.open if output.suffix == ".gz" else open
     with opener(output, "wt", encoding="utf-8") as handle:

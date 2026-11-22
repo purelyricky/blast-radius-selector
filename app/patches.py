@@ -56,6 +56,7 @@ def parse_patch(text):
     hunk = None
     old_header = None
     metadata = False
+    old_seen = new_seen = 0
     for line in text.splitlines():
         if line.startswith("diff --git "):
             current = None
@@ -69,12 +70,13 @@ def parse_patch(text):
             old_start, old_count, new_start, new_count = match.groups()
             hunk = Hunk(int(old_start), int(old_count or 1), int(new_start), int(new_count or 1))
             current.hunks.append(hunk)
+            old_seen = new_seen = 0
         elif hunk is not None and line and line[0] in " +-":
             # A header-looking removed or added line is still hunk content.
-            old_seen = sum(s[0] != "+" for s in hunk.lines)
-            new_seen = sum(s[0] != "-" for s in hunk.lines)
             if old_seen < hunk.old_count or new_seen < hunk.new_count:
                 hunk.lines.append(line)
+                old_seen += line[0] != "+"
+                new_seen += line[0] != "-"
             elif line.startswith("--- "):
                 old_header = _path(line, "a/")
                 hunk = None

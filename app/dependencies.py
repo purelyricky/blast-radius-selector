@@ -9,6 +9,7 @@ from collections import defaultdict
 import copy
 import gzip
 import json
+from functools import lru_cache
 from pathlib import Path
 
 from patches import InvalidPatch, apply_patch, parse_patch
@@ -18,6 +19,7 @@ class BroadChange(ValueError):
     pass
 
 
+@lru_cache(maxsize=8192)
 def _dump(node):
     return ast.dump(node, include_attributes=False)
 
@@ -166,12 +168,12 @@ class DependencySelector:
                 modified = apply_patch(source, patch)
                 # Compile bytes too: a changed encoding cookie can invalidate
                 # an otherwise unchanged AST parsed from a Unicode string.
-                compile(modified.encode("utf-8"), path, "exec", dont_inherit=True)
+                after = compile(modified.encode("utf-8"), path, "exec", flags=ast.PyCF_ONLY_AST, dont_inherit=True)
+                compile(after, path, "exec", dont_inherit=True)
                 before = self.source_trees.get(path)
                 if before is None:
                     before = ast.parse(source, filename=path)
                     self.source_trees[path] = before
-                after = ast.parse(modified, filename=path)
                 if path.startswith("tests/"):
                     selected.update(self.by_file.get(path, self.all_numbers))
                     continue
