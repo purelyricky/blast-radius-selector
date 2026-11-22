@@ -16,6 +16,7 @@ from pathlib import Path
 from compare_equivalence import equivalent_edits
 from equivalence import site_keys
 from deferred import deferred_body_changes
+from membership import membership_changes, name_regex
 from family import change_ok, docstring_only, header_default_changes, known_names
 from patches import InvalidPatch, apply_patch, parse_patch
 from package_changes import body_only as package_body_only, generator_kind, nested_body_only, region_imported
@@ -286,6 +287,40 @@ class DependencySelector:
         except (InvalidPatch, SyntaxError, ValueError):
             return False
 
+    def _membership_tier(self, patch_text):
+        """Added/removed whole definitions: select tests that execute lines mentioning the names."""
+        try:
+            patches = parse_patch(patch_text)
+            selected = set(self.always)
+            for patch in patches:
+                source = self.map["sources"].get(patch.old)
+                if source is None or patch.new != patch.old or not patch.old.startswith("sqlglot/") or patch.old.endswith("/__init__.py"):
+                    return None
+                found = membership_changes(ast.parse(source), ast.parse(apply_patch(source, patch)))
+                if found is None:
+                    return None
+                names, removed = found
+                for node in removed:  # tests that ran a removed definition
+                    selected.update(self._function_tests(patch.old, node))
+                excluded = {(patch.old, line) for node in removed for line in range(node.lineno, node.end_lineno + 1)}
+                pattern = name_regex(names)
+                for path, lines in self.map["lines"].items():
+                    text = self.map["sources"].get(path)
+                    if text is None or not pattern.search(text):
+                        continue
+                    for number, line in enumerate(text.splitlines(), 1):
+                        if (path, number) not in excluded and pattern.search(line):
+                            group = lines.get(str(number))
+                            if group is not None:
+                                selected.update(self._numbers(self._indices(group)))
+                # Test modules that mention the name textually are readers as well.
+                for path, text in self.map["sources"].items():
+                    if path.startswith("tests/") and pattern.search(text):
+                        selected.update(self.by_file.get(path, ()))
+            return selected if patches else None
+        except (InvalidPatch, SyntaxError, ValueError):
+            return None
+
     def _header_tier(self, patch_text):
         """Same-type literal default-value edits: only callers of the function are affected."""
         try:
@@ -458,6 +493,10 @@ class DependencySelector:
                 if self._docstring_tier(patch_text):
                     self.last_reason = "docstring-only edits"
                     return self._with_readers(patch_text, set(self.always))
+                members = self._membership_tier(patch_text)
+                if members is not None:
+                    self.last_reason = "name reachability of added/removed definitions"
+                    return members
                 headers = self._header_tier(patch_text)
                 if headers is not None:
                     self.last_reason = "literal default values of changed functions"
