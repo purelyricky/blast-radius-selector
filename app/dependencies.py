@@ -15,6 +15,7 @@ from pathlib import Path
 
 from compare_equivalence import equivalent_edits
 from equivalence import site_keys
+from deferred import deferred_body_changes
 from family import change_ok, docstring_only, header_default_changes, known_names
 from patches import InvalidPatch, apply_patch, parse_patch
 from package_changes import body_only as package_body_only, generator_kind, nested_body_only, region_imported
@@ -389,6 +390,17 @@ class DependencySelector:
                     selected.update(self._function_tests(region_path, region))
                 scopes += len(deferred)
                 for node, new_node in functions:
+                    if any(region_imported(node, node, self.import_lines.get(path, [])) for _ in (0,)):
+                        changed = deferred_body_changes(node, new_node)
+                        if changed is not None:
+                            if self.refiner is None:
+                                from elements import ElementRefiner
+                                self.refiner = ElementRefiner(self.map)
+                            if not any(self.refiner.imported_callable(path, nested) for nested in changed):
+                                for nested in changed:
+                                    selected.update(self._function_tests(path, nested))
+                                scopes += 1
+                                continue
                     regions = body_regions(node, new_node) if self.precision == "statement" else [node]
                     for region in regions:
                         if region_imported(node, region, self.import_lines.get(path, [])):
