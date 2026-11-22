@@ -208,6 +208,13 @@ class DependencySelector:
             self.function_tests[key] = self._numbers(indices)
         return self.function_tests[key]
 
+    def _with_readers(self, patch_text, selected):
+        """Add tests that read the patched file as data (e.g. TestTyping inspects code constants)."""
+        for patch in parse_patch(patch_text):
+            if patch.old in self.map["reads"]:
+                selected.update(self._numbers(self._indices(self.map["reads"][patch.old])))
+        return selected
+
     def _inert_tier(self, patch_text):
         """Paths no test can read: prose docs, CI metadata, license/changelog files."""
         try:
@@ -385,11 +392,11 @@ class DependencySelector:
                     return set(self.always)
                 if self._docstring_tier(patch_text):
                     self.last_reason = "docstring-only edits"
-                    return set(self.always)
+                    return self._with_readers(patch_text, set(self.always))
                 headers = self._header_tier(patch_text)
                 if headers is not None:
                     self.last_reason = "literal default values of changed functions"
-                    return headers
+                    return self._with_readers(patch_text, headers)
                 family = self._family_tier(patch_text)
                 if family is not None:
                     self.last_reason = f"dialect-family touch set after: {error}"

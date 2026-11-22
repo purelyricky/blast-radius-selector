@@ -14,6 +14,9 @@ import re
 _DEFINED = re.compile(r"^\s*(?:class|def)\s+(\w+)|^\s*(\w+)\s*(?::[^=\n]+)?=[^=]", re.M)
 
 
+_EXPORTED = re.compile(r"^(?:class|def)\s+(\w+)|^(\w+)\s*(?::[^=\n]+)?=[^=]", re.M)
+
+
 def known_names(sources):
     """{'all': every defined identifier, 'exp': identifiers defined in sqlglot/expressions/}."""
     names, exp = set(), set()
@@ -21,8 +24,9 @@ def known_names(sources):
         for match in _DEFINED.finditer(text):
             name = match.group(1) or match.group(2)
             names.add(name)
-            if path.startswith("sqlglot/expressions/"):
-                exp.add(name)
+        if path.startswith("sqlglot/expressions/"):
+            for match in _EXPORTED.finditer(text):
+                exp.add(match.group(1) or match.group(2))
     return {"all": names, "exp": exp}
 
 
@@ -37,8 +41,8 @@ def _leaf_ok(old, new, known, in_function):
     if isinstance(old, ast.Attribute):
         if not (type(old.ctx) is type(new.ctx) and isinstance(old.ctx, ast.Load) and dump(old.value) == dump(new.value)):
             return False
-        pool = known["exp"] if isinstance(old.value, ast.Name) and old.value.id == "exp" else known["all"]
-        return new.attr in pool
+        # Only exp.<Name> swaps are provable from top-level definitions of the expression modules.
+        return isinstance(old.value, ast.Name) and old.value.id == "exp" and new.attr in known["exp"]
     return False
 
 
@@ -54,8 +58,12 @@ def change_ok(old, new, known, in_function=False):
             return True
         if isinstance(old, (ast.Constant, ast.Name, ast.Attribute)):
             return _leaf_ok(old, new, known, in_function)
-        inside = in_function or isinstance(old, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
-        return all(change_ok(getattr(old, f, None), getattr(new, f, None), known, inside) for f in old._fields)
+        callable_node = isinstance(old, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+        # Defaults, decorators and annotations run at definition time; only bodies run later.
+        return all(
+            change_ok(getattr(old, f, None), getattr(new, f, None), known, in_function or (callable_node and f == "body"))
+            for f in old._fields
+        )
     if isinstance(old, list) and isinstance(new, list):
         return len(old) == len(new) and all(change_ok(a, b, known, in_function) for a, b in zip(old, new))
     return old == new
