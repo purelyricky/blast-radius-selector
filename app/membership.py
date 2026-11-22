@@ -14,41 +14,48 @@ import difflib
 import re
 
 DISPATCH = re.compile(r"(_sql$|^_?parse_|^_?build_|_builder$|^visit_|^__|^test)")
-_DEFINITION = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Assign, ast.AnnAssign, ast.Import, ast.ImportFrom)
 
 
 def _dump(node):
     return ast.dump(node, include_attributes=False)
 
 
-def bound_names(statement):
+def _plain_function(node, future_annotations):
+    """A def whose creation cannot raise and whose name is its only effect."""
+    if node.decorator_list or node.args.defaults or any(default is not None for default in node.args.kw_defaults):
+        return False
+    if not future_annotations:
+        annotations = [arg.annotation for arg in node.args.posonlyargs + node.args.args + node.args.kwonlyargs + [a for a in (node.args.vararg, node.args.kwarg) if a is not None]]
+        if any(a is not None for a in annotations) or node.returns is not None:
+            return False
+    return True
+
+
+def _literal(node):
+    try:
+        ast.literal_eval(node)
+        return True
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return False
+
+
+def bound_names(statement, in_class, future_annotations):
+    """Names bound by a statement that is safe to add or remove; raises ValueError otherwise."""
     if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if not _plain_function(statement, future_annotations):
+            raise ValueError("eager function header")
         return {statement.name}
-    if isinstance(statement, ast.Assign):
-        names = set()
-        for target in statement.targets:
-            if isinstance(target, ast.Name):
-                names.add(target.id)
-            else:
-                raise ValueError("complex assignment target")
-        return names
-    if isinstance(statement, ast.AnnAssign):
-        if not isinstance(statement.target, ast.Name):
-            raise ValueError("complex assignment target")
-        return {statement.target.id}
-    names = set()
-    for alias in statement.names:
-        if alias.name == "*":
-            raise ValueError("star import")
-        names.add(alias.asname or alias.name.split(".")[0])
-    return names
+    if isinstance(statement, ast.Assign) and not in_class and all(isinstance(t, ast.Name) for t in statement.targets) and _literal(statement.value):
+        return {t.id for t in statement.targets}
+    raise ValueError("definition kind not provable")
 
 
 def membership_changes(before, after):
     """Return (names, removed_nodes) if only whole definitions were added/removed, else None."""
     names, removed = set(), []
+    future_annotations = any(isinstance(n, ast.ImportFrom) and n.module == "__future__" and any(a.name == "annotations" for a in n.names) for n in before.body)
 
-    def walk(old_body, new_body):
+    def walk(old_body, new_body, in_class=False):
         matcher = difflib.SequenceMatcher(a=[_dump(s) for s in old_body], b=[_dump(s) for s in new_body], autojunk=False)
         for tag, i1, i2, j1, j2 in matcher.get_opcodes():
             if tag == "equal":
@@ -60,12 +67,10 @@ def membership_changes(before, after):
                 ha.body, hb.body = [], []
                 if _dump(ha) != _dump(hb):
                     raise ValueError("class header changed")
-                walk(a.body, b.body)
+                walk(a.body, b.body, True)
                 continue
             for statement in olds + news:
-                if not isinstance(statement, _DEFINITION):
-                    raise ValueError("non-definition statement changed")
-                bound = bound_names(statement)
+                bound = bound_names(statement, in_class, future_annotations)
                 if any(DISPATCH.search(name) for name in bound):
                     raise ValueError("dispatch-by-name convention")
                 names.update(bound)

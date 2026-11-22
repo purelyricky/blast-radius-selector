@@ -303,6 +303,22 @@ class DependencySelector:
                 for node in removed:  # tests that ran a removed definition
                     selected.update(self._function_tests(patch.old, node))
                 excluded = {(patch.old, line) for node in removed for line in range(node.lineno, node.end_lineno + 1)}
+                removed_names = set()
+                for node in removed:
+                    removed_names.add(node.name if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else None)
+                    if isinstance(node, ast.Assign):
+                        removed_names.update(t.id for t in node.targets)
+                removed_names.discard(None)
+                if removed_names:
+                    # A removed name still mentioned by code that runs while importing breaks those modules.
+                    hazard = name_regex(removed_names)
+                    for path, text in self.map["sources"].items():
+                        if not hazard.search(text):
+                            continue
+                        import_lines = set(self.import_lines.get(path, ()))
+                        for number, line in enumerate(text.splitlines(), 1):
+                            if number in import_lines and (path, number) not in excluded and hazard.search(line):
+                                return None
                 pattern = name_regex(names)
                 for path, lines in self.map["lines"].items():
                     text = self.map["sources"].get(path)
