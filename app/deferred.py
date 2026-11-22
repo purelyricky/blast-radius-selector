@@ -9,6 +9,7 @@ importing.
 """
 import ast
 import copy
+from package_changes import generator_kind
 
 _DEFERRED = (ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef)
 
@@ -26,7 +27,8 @@ def _mask(function):
             else:
                 stack.append(child)
                 continue
-            stack.append(child)  # decorators, defaults and annotations stay eager
+            # Do not mask callables inside a nested header: those values are
+            # created before this callable's body is ever invoked.
     return function
 
 
@@ -47,7 +49,7 @@ def deferred_body_changes(old_function, new_function):
         return None
     changed = []
     for old, new in zip(old_nodes, new_nodes):
-        if type(old) is not type(new):
+        if type(old) is not type(new) or generator_kind(old) != generator_kind(new):
             return None
         if ast.dump(old, include_attributes=False) != ast.dump(new, include_attributes=False):
             changed.append(old)
