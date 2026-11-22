@@ -38,6 +38,22 @@ def _dump(node):
     return ast.dump(node, include_attributes=False)
 
 
+def ast_equal(a, b):
+    """Structural equality ignoring positions (same relation as comparing ast.dump strings, without building them)."""
+    if a is b:
+        return True
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, ast.AST):
+        for field in a._fields:
+            if not ast_equal(getattr(a, field, None), getattr(b, field, None)):
+                return False
+        return True
+    if isinstance(a, list):
+        return len(a) == len(b) and all(ast_equal(x, y) for x, y in zip(a, b))
+    return a == b
+
+
 def _is_literal(node):
     try:
         ast.literal_eval(node)
@@ -81,14 +97,14 @@ def changed_functions(before, after, pairs=False):
         if len(old_body) != len(new_body):
             raise BroadChange("scope members added or removed")
         for old, new in zip(old_body, new_body):
-            if _dump(old) == _dump(new):
+            if ast_equal(old, new):
                 continue
             if type(old) is not type(new):
                 raise BroadChange("statement kind changed")
             if isinstance(old, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 old_header, new_header = copy.copy(old), copy.copy(new)
                 old_header.body, new_header.body = [], []
-                if _dump(old_header) != _dump(new_header):
+                if not ast_equal(old_header, new_header):
                     raise BroadChange("function header changed")
                 if ast.get_docstring(old, clean=False) != ast.get_docstring(new, clean=False):
                     raise BroadChange("function metadata changed")
@@ -100,7 +116,7 @@ def changed_functions(before, after, pairs=False):
             elif isinstance(old, ast.ClassDef):
                 old_header, new_header = copy.copy(old), copy.copy(new)
                 old_header.body, new_header.body = [], []
-                if _dump(old_header) != _dump(new_header):
+                if not ast_equal(old_header, new_header):
                     raise BroadChange("class header changed")
                 compare(old.body, new.body)
             else:
@@ -122,7 +138,7 @@ def body_regions(before, after):
             regions.append(parent)
             return
         for old, new in zip(old_body, new_body):
-            if _dump(old) == _dump(new):
+            if ast_equal(old, new):
                 continue
             if type(old) is not type(new):
                 regions.append(old)
@@ -135,7 +151,7 @@ def body_regions(before, after):
                 old_header.body, new_header.body = [], []
                 if hasattr(old, "orelse"):
                     old_header.orelse, new_header.orelse = [], []
-                if _dump(old_header) == _dump(new_header):
+                if ast_equal(old_header, new_header):
                     sequence(old.body, new.body, old)
                     if hasattr(old, "orelse"):
                         sequence(old.orelse, new.orelse, old)
@@ -150,7 +166,7 @@ def body_regions(before, after):
                     node.handlers = [copy.copy(handler) for handler in node.handlers]
                     for handler in node.handlers:
                         handler.body = []
-                if _dump(old_header) == _dump(new_header):
+                if ast_equal(old_header, new_header):
                     sequence(old.body, new.body, old)
                     sequence(old.orelse, new.orelse, old)
                     sequence(old.finalbody, new.finalbody, old)
@@ -194,22 +210,11 @@ class DependencySelector:
         self.shared_refiner = None
         self.family_names = None
         self._mentions_pytest = False
-        self.shared_metadata = None
-        shared_path = Path(map_path).with_name("shared_reads.json.gz")
-        if not shared_path.exists():
-            shared_path = Path(map_path).with_name("shared_reads.json")
-        if shared_path.exists():
-            opener = gzip.open if shared_path.suffix == '.gz' else open
-            with opener(shared_path, 'rt', encoding='utf-8') as handle:
-                shared = json.load(handle)
-            if shared.get("version") == 2 and shared.get("revision") == self.map["revision"] and shared.get("ids") == self.map["ids"]:
-                self.shared_metadata = shared
-        self.predicate_refiner = None
-        predicate_path = Path(map_path).with_name('predicate_values.json.gz')
-        if predicate_path.exists():
-            from predicate_values import PredicateRefiner
-            with gzip.open(predicate_path, 'rt', encoding='utf-8') as handle:
-                self.predicate_refiner = PredicateRefiner(json.load(handle), self.map['revision'], self.map['ids'])
+        self._map_path = Path(map_path)
+        self._shared_loaded = False
+        self._shared_metadata = None
+        self._predicate_loaded = False
+        self._predicate_refiner = None
         self.proven_sites = frozenset()
         self.equivalence_keys = {}
         eq_path = Path(map_path).with_name("eq_sites.json")
@@ -217,6 +222,33 @@ class DependencySelector:
             eq = json.loads(eq_path.read_text(encoding="utf-8"))
             if eq.get("revision") == self.map["revision"]:
                 self.proven_sites = frozenset(eq["proven"])
+
+    @property
+    def shared_metadata(self):
+        """Per-class reader metadata, loaded on first use (most patches never need it)."""
+        if not self._shared_loaded:
+            self._shared_loaded = True
+            path = self._map_path.with_name("shared_reads.json.gz")
+            if not path.exists():
+                path = self._map_path.with_name("shared_reads.json")
+            if path.exists():
+                opener = gzip.open if path.suffix == ".gz" else open
+                with opener(path, "rt", encoding="utf-8") as handle:
+                    shared = json.load(handle)
+                if shared.get("version") == 2 and shared.get("revision") == self.map["revision"] and shared.get("ids") == self.map["ids"]:
+                    self._shared_metadata = shared
+        return self._shared_metadata
+
+    @property
+    def predicate_refiner(self):
+        if not self._predicate_loaded:
+            self._predicate_loaded = True
+            path = self._map_path.with_name("predicate_values.json.gz")
+            if path.exists():
+                from predicate_values import PredicateRefiner
+                with gzip.open(path, "rt", encoding="utf-8") as handle:
+                    self._predicate_refiner = PredicateRefiner(json.load(handle), self.map["revision"], self.map["ids"])
+        return self._predicate_refiner
 
     def _numbers(self, indices):
         return {self.numbers[index] for index in indices if self.numbers[index] is not None}
