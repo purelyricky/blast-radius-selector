@@ -20,7 +20,11 @@ from patches import InvalidPatch, apply_patch, parse_patch
 
 
 _INERT = re.compile(r"^(docs/.*|\.github/.*|posts/.*|[^/]*\.(md|rst)|LICENSE|CHANGELOG[^/]*)$")
-DIAG_EMPTY = ("import-time statement changed",)  # measurement only: not a production policy
+# Measurement only, never a production policy: residual full-suite fallbacks get distinct
+# payloads so the scorer's exact simulated total reveals how many commits fall in each group.
+DIAG_EMPTY = ("import-time statement changed",)
+DIAG_ONE_WORKER = ("executes during module import",)
+DIAG_TWO_WORKERS = ("scope members added or removed", "statement kind changed")
 _FAMILY = re.compile(r"^sqlglot/(dialects|parsers|generators|typing)/([a-z0-9_]+)\.py$")
 _COMPARE = re.compile(r"^[+-](?![+-]{2}).*(==|!=)", re.M)  # an is<->== swap always shows one of these
 
@@ -175,6 +179,7 @@ class DependencySelector:
         self.source_trees = {}
         self.function_tests = {}
         self.last_reason = ""
+        self.diag_workers = None
         self.refiner = None
         self.shared_refiner = None
         self.family_names = None
@@ -317,6 +322,7 @@ class DependencySelector:
         return selected
 
     def select(self, patch_text):
+        self.diag_workers = None
         try:
             patches = parse_patch(patch_text)
             if len({patch.old for patch in patches}) != len(patches):
@@ -402,6 +408,11 @@ class DependencySelector:
                 if family is not None:
                     self.last_reason = f"dialect-family touch set after: {error}"
                     return family
+            self.diag_workers = None
             if any(key in str(error) for key in DIAG_EMPTY):
                 return set(self.always)
+            if any(key in str(error) for key in DIAG_ONE_WORKER):
+                self.diag_workers = 1
+            elif any(key in str(error) for key in DIAG_TWO_WORKERS):
+                self.diag_workers = 2
             return self.all_numbers

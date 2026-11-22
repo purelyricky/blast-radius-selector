@@ -28,6 +28,16 @@ def main():
                 print(f"{p.stem}: full-suite fallback: {type(error).__name__}", file=sys.stderr)
             if os.environ.get("BR_DEBUG"):
                 print(f"{p.stem}: {len(selected)} tests; {selector.last_reason}", file=sys.stderr)
+        forced = getattr(selector, "diag_workers", None) if selector is not None else None
+        if forced:
+            loads = [0] * forced
+            workers = [[] for _ in range(forced)]
+            for number, millis in sorted(items, key=lambda item: -item[1]):
+                lightest = loads.index(min(loads))
+                workers[lightest].append(number)
+                loads[lightest] += millis
+            print(json.dumps({"commit": p.stem, "workers": workers}, separators=(",", ":")))
+            continue
         if selected not in cache:
             cache[selected] = pack([item_by_number[n] for n in sorted(selected)])
         print(json.dumps({"commit": p.stem, "workers": cache[selected]}, separators=(",", ":")))
