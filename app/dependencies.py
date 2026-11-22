@@ -129,6 +129,7 @@ class DependencySelector:
         self.source_trees = {}
         self.function_tests = {}
         self.last_reason = ""
+        self.refiner = None
 
     def _numbers(self, indices):
         return {self.numbers[index] for index in indices if self.numbers[index] is not None}
@@ -177,7 +178,18 @@ class DependencySelector:
                 if path.startswith("tests/"):
                     selected.update(self.by_file.get(path, self.all_numbers))
                     continue
-                functions = changed_functions(before, after, pairs=True)
+                deferred = []
+                try:
+                    functions = changed_functions(before, after, pairs=True)
+                except BroadChange:
+                    if self.refiner is None:
+                        from elements import ElementRefiner
+                        self.refiner = ElementRefiner(self.map)
+                    normalized, deferred = self.refiner.normalize(path, before, after)
+                    functions = changed_functions(before, normalized, pairs=True)
+                for region_path, region in deferred:
+                    selected.update(self._function_tests(region_path, region))
+                scopes += len(deferred)
                 for node, new_node in functions:
                     body_start = node.body[0].lineno
                     if any(body_start <= line <= node.end_lineno for line in self.map.get("import_lines", {}).get(path, [])):

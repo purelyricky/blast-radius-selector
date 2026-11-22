@@ -138,6 +138,8 @@ def main():
     parser.add_argument("--import-calls", type=Path, help="optional metadata from build_imports.py")
     args = parser.parse_args()
     root = args.source.resolve()
+    if (root / ".git/HEAD").read_text().strip() != PINNED:
+        raise RuntimeError("source checkout must be detached at the pinned revision")
     output = args.output.resolve()
     coverage_path = args.coverage.resolve()
     coverage_path.parent.mkdir(parents=True, exist_ok=True)

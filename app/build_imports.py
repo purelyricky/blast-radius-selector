@@ -5,9 +5,12 @@ source line, so ordinary line coverage cannot separate their import effects.
 """
 import argparse
 import importlib
+import io
+import contextlib
 import json
 from pathlib import Path
 import sys
+import os
 
 
 def main():
@@ -16,6 +19,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     root = args.source.resolve()
+    if (root / ".git/HEAD").read_text().strip() != "eb11aec4be8cb2122afe713a4816662c3f0fb2fa":
+        raise RuntimeError("source checkout must be detached at the pinned revision")
     sys.path.insert(0, str(root))
     calls = set()
     failed = []
@@ -28,6 +33,13 @@ def main():
                 calls.add((filename[len(prefix):], code.co_firstlineno, code.co_name))
     sys.setprofile(profile)
     try:
+        import pytest
+        os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+        os.chdir(root)
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = pytest.main(["tests", "--collect-only", "-q", "-p", "no:cacheprovider"])
+        if code:
+            raise RuntimeError("incomplete baseline test collection")
         for path in sorted((root / "sqlglot").rglob("*.py")):
             if path.name == "__main__.py":
                 continue
