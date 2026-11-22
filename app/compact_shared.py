@@ -1,5 +1,6 @@
 """Intern repeated baseline reader sets in an ordinary JSON artifact."""
 import argparse
+import gzip
 import json
 from pathlib import Path
 
@@ -22,12 +23,16 @@ def main():
     parser.add_argument("input", type=Path)
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
-    data = json.loads(args.input.read_text(encoding="utf-8"))
+    opener = gzip.open if args.input.suffix == '.gz' else open
+    with opener(args.input, 'rt', encoding='utf-8') as handle:
+        data = json.load(handle)
     data.pop("used", None)
     data["fields"], data["groups"] = intern(data["fields"])
     data["imports"], data["reader_groups"] = intern(data["imports"])
     temporary = args.output.with_suffix(args.output.suffix + ".tmp")
-    temporary.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+    opener = gzip.open if args.output.suffix == '.gz' else open
+    with opener(temporary, 'wt', encoding='utf-8') as handle:
+        json.dump(data, handle, separators=(',', ':'))
     temporary.replace(args.output)
     print(f"{args.output.stat().st_size} bytes; {len(data['groups'])} test sets; {len(data['reader_groups'])} import reader sets")
 

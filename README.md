@@ -9,11 +9,15 @@ The selector uses dependency metadata generated solely from unmodified sqlglot a
 1. Observe per-test source coverage and fixture reads on the pinned baseline. Class setup dependencies extend to every test in the class. Process-pool computations use synchronous instrumentation and pickle round trips to preserve copy boundaries and attribute their dependencies to the submitting test.
 2. Strictly apply each patch to pinned source and compile it without execution. Malformed patches, unknown dependencies, syntax/import hazards and unsupported structural changes use a conservative fallback.
 3. Compare Python ASTs. Body changes select baseline consumers of the changed statement region; insertions and changed control flow include the enclosing entry region. Deferred lambda bodies and proven pure closure factories are attributed to their callable consumers. Import-time callables retain conservative handling.
+
+Shared class values use a separate baseline reader map, including concrete classes, inherited fields, metaclass consumers and reflective attribute reads. Eager readers must have a supported unchanged flow before a class-value change is narrowed. Package initializer body edits keep the same top-level structure and headers. Generator-kind changes, changed callable defaults and unsupported eager flows retain broader selection.
+
+Predicate replay supports edits confined to single-operator comparisons with an unchanged dynamic operand and a primitive literal. Baseline numeric bounds and string fingerprints identify tests whose predicate outcomes can change. Numeric proofs cover the complete recorded interval; string fingerprints prove absence only. Unknown operands and changed import-time outcomes retain conservative selection. File readers and memory-sensitive contexts remain protected. The profiles contain baseline observations, not mutations or failing-test answers.
 3b. Comparison equivalence: `build_equivalence.py` runs the baseline suite on an instrumented copy of the pinned sqlglot and records the operand types at every single-operator `is`/`==`/`!=` site. A site whose operands always use identity equality (default object equality, `None`, or members of one non-Flag Enum) is "proven"; swapping `is`/`==` there is normalized away before diffing (`equivalence.py`, `eq_sites.json`).
 3c. Dialect-family tier: when an edit cannot be refined but only swaps same-type constant leaves (for example `-1` to `-2`) inside a dialect's own modules, select the tests that executed that dialect family's code in the baseline (plus inheriting dialects and the dialect's test file) instead of the full suite. Idea of file-level dynamic dependencies follows Ekstazi (Gligoric et al., ISSTA 2015); name-based refinement follows NameRTS (Wang, Pradel, Liu, ISSTA 2026, arXiv:2605.25356), read for ideas only, no code copied.
 4. Pack selected tests with longest-first scheduling for each worker count from one through eight, minimizing the busiest worker plus two seconds per worker. Reuse identical selections across the batch.
 
-The map is an ordinary JSON file committed in the repository. Docker builds need no network downloads beyond the pinned Python base image. The production process reads `/data/tests.json` and `/data/commits/*.patch`, emits only the required JSON lines on stdout, and needs no writable project files.
+Maps are ordinary JSON artifacts, with larger maps stored using gzip, committed in the repository. Docker builds need no network downloads beyond the pinned Python base image. The production process reads `/data/tests.json` and `/data/commits/*.patch`, emits only the required JSON lines on stdout, and needs no writable project files.
 
 ## Build and validate
 
@@ -22,6 +26,11 @@ docker build -t blast-radius-selector .
 python check_container.py blast-radius-selector /path/to/sample
 python app/test_dependencies.py
 python app/test_elements.py
+python app/test_shared.py
+python app/test_package_changes.py
+python app/test_deferred.py
+python app/test_compare_equivalence.py
+python app/test_predicate_values.py
 ```
 
 `check_container.py` runs the image without network access, as nobody, with a read-only filesystem, two CPUs, 4 GB memory, 256 processes and a 64 MB temporary directory. It checks stdout with the official sample scorer and reports simulated time, process CPU and peak memory.
@@ -32,7 +41,18 @@ For native validation, set `BR_DATA` to the sample directory. `BR_MAP` can selec
 
 Clone the public sqlglot repository under `vendor/sqlglot`, detach at the pinned commit above, and build `Dockerfile.map`. This uses the scorer's exact Python/SQLite image and pinned public PyPI dependencies. Mount the checkout at `/source`, this repository's `app` directory at `/app`, and an output directory at `/output`.
 
-Run `build_imports.py --source /source --output /output/import-calls.json`, then `build_map.py --source /source --output /output/dependency_map.json --coverage /output/.coverage --import-calls /output/import-calls.json` inside that image. The baseline suite must collect completely. Source snapshots, coverage, import effects and fixture dependencies are metadata inputs; benchmark patches and failing-test labels are not inputs.
+Run these commands inside that image, then copy the resulting maps into `app/`:
+
+```sh
+python /app/build_imports.py --source /source --output /output/import-calls.json
+python /app/build_map.py --source /source --output /output/dependency_map.json.gz --coverage /output/.coverage --import-calls /output/import-calls.json
+python /app/build_import_execution.py --source /source --output /output/import_execution.json
+python /app/build_shared.py --source /source --output /output/shared-raw.json.gz
+python /app/compact_shared.py /output/shared-raw.json.gz /output/shared_reads.json.gz
+python /app/build_predicate_values.py --source /source --output /output/predicate_values.json.gz
+```
+
+The baseline suite must collect completely and pass. Source snapshots, coverage, import effects and fixture dependencies are metadata inputs; benchmark patches and failing-test labels are not inputs.
 
 ## Third-party code and libraries
 

@@ -12,6 +12,7 @@ import concurrent.futures
 import importlib.abc
 import importlib.machinery
 import importlib
+import gzip
 import json
 import os
 from pathlib import Path
@@ -256,7 +257,9 @@ def main():
     field_used = {key: sorted({n for context in contexts for n in expand(context)}) for key, contexts in recorder.field_used.items()}
     imports = {key: sorted(consumers) for key, consumers in recorder.imports.items()}
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps({"version": 2, "revision": PINNED, "ids": ids, "used": used, "fields": field_used, "imports": imports, "metaclasses": {key: sorted(value) for key, value in recorder.metaclasses.items()}}, separators=(",", ":")), encoding="utf-8")
+    opener = gzip.open if output.suffix == '.gz' else open
+    with opener(output, 'wt', encoding='utf-8') as handle:
+        json.dump({"version": 2, "revision": PINNED, "ids": ids, "used": used, "fields": field_used, "imports": imports, "metaclasses": {key: sorted(value) for key, value in recorder.metaclasses.items()}}, handle, separators=(',', ':'))
     print(f"Shared-field map: {len(ids)} tests, {len(used)} classes, {len(imports)} imported fields, {output.stat().st_size} bytes", file=sys.stderr)
 
 
