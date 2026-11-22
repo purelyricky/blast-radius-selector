@@ -23,8 +23,7 @@ from package_changes import body_only as package_body_only, generator_kind, nest
 
 
 _INERT = re.compile(r"^(docs/.*|\.github/.*|posts/.*|[^/]*\.(md|rst)|LICENSE|CHANGELOG[^/]*)$")
-_PYTEST_CONFIG = ("conftest.py", "pytest.ini", "tox.ini")
-_CONFIG_MAYBE = ("setup.cfg", "pyproject.toml")  # inert unless the patch mentions pytest
+_PYTEST_CONFIG = ("conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml", "setup.py")
 _FAMILY = re.compile(r"^sqlglot/(dialects|parsers|generators|typing)/([a-z0-9_]+)\.py$")
 _COMPARE = re.compile(r"^[+-](?![+-]{2}).*(==|!=)", re.M)  # an is<->== swap always shows one of these
 _PREDICATE = re.compile(r"^[+-](?![+-]{2}).*(==|!=|<|>)", re.M)
@@ -250,7 +249,7 @@ class DependencySelector:
         if _INERT.match(path):
             return True
         name = path.rsplit("/", 1)[-1]
-        if name in _PYTEST_CONFIG or (name in _CONFIG_MAYBE and self._mentions_pytest):
+        if name in _PYTEST_CONFIG:
             return False
         if path.startswith("tests/"):
             return path.endswith(".py") and name != "__init__.py"  # a new test module is not in tests.json
@@ -296,7 +295,10 @@ class DependencySelector:
                 source = self.map["sources"].get(patch.old)
                 if source is None or patch.new != patch.old or not patch.old.startswith("sqlglot/") or patch.old.endswith("/__init__.py"):
                     return None
-                found = membership_changes(ast.parse(source), ast.parse(apply_patch(source, patch)))
+                modified = apply_patch(source, patch)
+                after = compile(modified.encode('utf-8'), patch.old, 'exec', flags=ast.PyCF_ONLY_AST, dont_inherit=True)
+                compile(after, patch.old, 'exec', dont_inherit=True)
+                found = membership_changes(ast.parse(source), after)
                 if found is None:
                     return None
                 names, removed = found
@@ -309,9 +311,10 @@ class DependencySelector:
                     if isinstance(node, ast.Assign):
                         removed_names.update(t.id for t in node.targets)
                 removed_names.discard(None)
-                if removed_names:
-                    # A removed name still mentioned by code that runs while importing breaks those modules.
-                    hazard = name_regex(removed_names)
+                if names:
+                    # Changed bindings can affect module initialization through
+                    # both removal and shadowing of names used by eager code.
+                    hazard = name_regex(names)
                     for path, text in self.map["sources"].items():
                         if not hazard.search(text):
                             continue
@@ -512,7 +515,7 @@ class DependencySelector:
                 members = self._membership_tier(patch_text)
                 if members is not None:
                     self.last_reason = "name reachability of added/removed definitions"
-                    return members
+                    return self._with_readers(patch_text, members)
                 headers = self._header_tier(patch_text)
                 if headers is not None:
                     self.last_reason = "literal default values of changed functions"

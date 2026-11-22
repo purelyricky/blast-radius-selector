@@ -42,7 +42,7 @@ def _literal(node):
 def bound_names(statement, in_class, future_annotations):
     """Names bound by a statement that is safe to add or remove; raises ValueError otherwise."""
     if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        if not _plain_function(statement, future_annotations):
+        if in_class or not _plain_function(statement, future_annotations):
             raise ValueError("eager function header")
         return {statement.name}
     if isinstance(statement, ast.Assign) and not in_class and all(isinstance(t, ast.Name) for t in statement.targets) and _literal(statement.value):
@@ -69,6 +69,18 @@ def membership_changes(before, after):
                     raise ValueError("class header changed")
                 walk(a.body, b.body, True)
                 continue
+            existing = set()
+            for statement in old_body:
+                for node in ast.walk(statement):
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        existing.add(node.name)
+                    elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                        existing.add(node.id)
+                    elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                        existing.update(alias.asname or alias.name.split('.')[0] for alias in node.names)
+            for statement in news:
+                if bound_names(statement, in_class, future_annotations).intersection(existing):
+                    raise ValueError('added definition shadows an existing binding')
             for statement in olds + news:
                 bound = bound_names(statement, in_class, future_annotations)
                 if any(DISPATCH.search(name) for name in bound):
