@@ -57,6 +57,18 @@ class DeferredElements(unittest.TestCase):
         _, regions = self.refiner(old).normalize("sqlglot/example.py", ast.parse(old), ast.parse(new))
         self.assertEqual(regions, [])
 
+    def test_normalization_preserves_input_trees_and_cache(self):
+        old = "class C:\n TABLE={'x': lambda x:x+1}\n"
+        new = old.replace("x+1", "x+2")
+        before, after = ast.parse(old), ast.parse(new)
+        snapshots = (ast.dump(before, include_attributes=True), ast.dump(after, include_attributes=True))
+        refiner = self.refiner(old)
+        for _ in range(2):
+            result, regions = refiner.normalize("sqlglot/example.py", before, after)
+            self.assertEqual(ast.dump(result), ast.dump(before))
+            self.assertEqual(len(regions), 1)
+            self.assertEqual(snapshots, (ast.dump(before, include_attributes=True), ast.dump(after, include_attributes=True)))
+
 
 if __name__ == "__main__":
     unittest.main()

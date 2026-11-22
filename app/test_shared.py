@@ -101,6 +101,17 @@ class SharedValues(unittest.TestCase):
         result, _ = self.refine(old, new, metadata)
         self.assertEqual(ast.dump(result), ast.dump(ast.parse(new)))
 
+    def test_normalization_preserves_input_trees_and_cache(self):
+        old, new = "class C:\n X=1\n", "class C:\n X=2\n"
+        before, after = ast.parse(old), ast.parse(new)
+        snapshots = (ast.dump(before, include_attributes=True), ast.dump(after, include_attributes=True))
+        refiner = SharedRefiner({PATH: old}, self.metadata())
+        for _ in range(2):
+            result, selected = refiner.normalize(PATH, before, after)
+            self.assertEqual(ast.dump(result), ast.dump(before))
+            self.assertEqual(selected, {0})
+            self.assertEqual(snapshots, (ast.dump(before, include_attributes=True), ast.dump(after, include_attributes=True)))
+
 
 if __name__ == "__main__":
     unittest.main()

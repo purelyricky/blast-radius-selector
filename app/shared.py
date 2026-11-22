@@ -249,22 +249,30 @@ class SharedRefiner:
         return selected
 
     def normalize(self, path, before, after):
-        normalized = copy.deepcopy(after)
         selected = set()
         def walk(old_body, new_body, prefix=(), class_node=None):
             if len(old_body) != len(new_body):
-                return
+                return new_body
+            replacements = {}
             for index, (old, new) in enumerate(zip(old_body, new_body)):
                 if dump(old) == dump(new):
                     continue
                 if isinstance(old, ast.ClassDef) and isinstance(new, ast.ClassDef):
-                    walk(old.body, new.body, prefix + (old.name,), old)
+                    body = walk(old.body, new.body, prefix + (old.name,), old)
+                    if body is not new.body:
+                        replacement = copy.copy(new)
+                        replacement.body = body
+                        replacements[index] = replacement
                 elif class_node is not None:
                     try:
                         consumers = self.literal_change(path, ".".join(prefix), class_node, old, new)
                     except (UnsafeValue, ValueError, TypeError, SyntaxError, AttributeError):
                         continue
-                    new_body[index] = copy.deepcopy(old)
+                    replacements[index] = old
                     selected.update(consumers)
-        walk(before.body, normalized.body)
+            return [replacements.get(index, node) for index, node in enumerate(new_body)] if replacements else new_body
+        body = walk(before.body, after.body)
+        normalized = copy.copy(after) if body is not after.body else after
+        if body is not after.body:
+            normalized.body = body
         return normalized, selected

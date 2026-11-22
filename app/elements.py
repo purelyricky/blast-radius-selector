@@ -148,11 +148,11 @@ class ElementRefiner:
 
     def normalize(self, path, before, after):
         """Return AST with recognized deferred edits reverted, plus consumers."""
-        normalized = copy.deepcopy(after)
         regions = []
         def compare(old_body, new_body, in_class=False):
             if len(old_body) != len(new_body):
-                return
+                return new_body
+            replacements = {}
             bound = set()
             for index, (old, new) in enumerate(zip(old_body, new_body)):
                 blocked = set(bound) if in_class else set()
@@ -166,13 +166,21 @@ class ElementRefiner:
                 if dump(old) == dump(new):
                     continue
                 if isinstance(old, ast.ClassDef) and isinstance(new, ast.ClassDef):
-                    compare(old.body, new.body, in_class=True)
+                    body = compare(old.body, new.body, in_class=True)
+                    if body is not new.body:
+                        replacement = copy.copy(new)
+                        replacement.body = body
+                        replacements[index] = replacement
                 elif not isinstance(old, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     try:
                         found = self._deferred_statement(path, old, new, blocked)
                     except UnsupportedElement:
                         continue
-                    new_body[index] = copy.deepcopy(old)
+                    replacements[index] = old
                     regions.extend(found)
-        compare(before.body, normalized.body)
+            return [replacements.get(index, node) for index, node in enumerate(new_body)] if replacements else new_body
+        body = compare(before.body, after.body)
+        normalized = copy.copy(after) if body is not after.body else after
+        if body is not after.body:
+            normalized.body = body
         return normalized, regions

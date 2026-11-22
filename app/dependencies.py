@@ -13,10 +13,13 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
-from equivalence import normalize
+from compare_equivalence import equivalent_edits
+from equivalence import site_keys
+from family import change_ok, docstring_only, header_default_changes, known_names
 from patches import InvalidPatch, apply_patch, parse_patch
 
 
+_INERT = re.compile(r"^(docs/.*|\.github/.*|posts/.*|[^/]*\.(md|rst)|LICENSE|CHANGELOG[^/]*)$")
 _FAMILY = re.compile(r"^sqlglot/(dialects|parsers|generators|typing)/([a-z0-9_]+)\.py$")
 _COMPARE = re.compile(r"^[+-](?![+-]{2}).*(==|!=)", re.M)  # an is<->== swap always shows one of these
 
@@ -173,6 +176,7 @@ class DependencySelector:
         self.last_reason = ""
         self.refiner = None
         self.shared_refiner = None
+        self.family_names = None
         self.shared_metadata = None
         shared_path = Path(map_path).with_name("shared_reads.json")
         if shared_path.exists():
@@ -180,6 +184,7 @@ class DependencySelector:
             if shared.get("version") == 2 and shared.get("revision") == self.map["revision"] and shared.get("ids") == self.map["ids"]:
                 self.shared_metadata = shared
         self.proven_sites = frozenset()
+        self.equivalence_keys = {}
         eq_path = Path(map_path).with_name("eq_sites.json")
         if eq_path.exists():
             eq = json.loads(eq_path.read_text(encoding="utf-8"))
@@ -202,6 +207,51 @@ class DependencySelector:
                     indices.update(self._indices(lines[str(lineno)]))
             self.function_tests[key] = self._numbers(indices)
         return self.function_tests[key]
+
+    def _inert_tier(self, patch_text):
+        """Paths no test can read: prose docs, CI metadata, license/changelog files."""
+        try:
+            patches = parse_patch(patch_text)
+        except InvalidPatch:
+            return False
+        return bool(patches) and all(
+            _INERT.match(patch.old) and _INERT.match(patch.new) and patch.old not in self.map["reads"] and patch.old not in self.map["sources"]
+            for patch in patches
+        )
+
+    def _docstring_tier(self, patch_text):
+        try:
+            patches = parse_patch(patch_text)
+            for patch in patches:
+                source = self.map["sources"].get(patch.old)
+                if source is None or patch.new != patch.old or not patch.old.startswith("sqlglot/") or patch.old.endswith("/__init__.py"):
+                    return False
+                if not docstring_only(ast.parse(source), ast.parse(apply_patch(source, patch))):
+                    return False
+            return bool(patches)
+        except (InvalidPatch, SyntaxError, ValueError):
+            return False
+
+    def _header_tier(self, patch_text):
+        """Same-type literal default-value edits: only callers of the function are affected."""
+        try:
+            patches = parse_patch(patch_text)
+            selected = set(self.always)
+            for patch in patches:
+                source = self.map["sources"].get(patch.old)
+                if source is None or patch.new != patch.old or not patch.old.startswith("sqlglot/") or patch.old.endswith("/__init__.py"):
+                    return None
+                functions = header_default_changes(ast.parse(source), ast.parse(apply_patch(source, patch)))
+                if functions is None:
+                    return None
+                import_lines = self.map.get("import_lines", {}).get(patch.old, [])
+                for node in functions:
+                    if any(node.body[0].lineno <= line <= node.end_lineno for line in import_lines):
+                        return None
+                    selected.update(self._function_tests(patch.old, node))
+            return selected if patches else None
+        except (InvalidPatch, SyntaxError, ValueError):
+            return None
 
     def _family_tier(self, patch_text):
         """Middle tier for pure-literal edits to a dialect's own modules.
@@ -233,7 +283,9 @@ class DependencySelector:
             except (SyntaxError, ValueError, InvalidPatch):
                 return None
             before = self.source_trees.get(patch.old) or ast.parse(source)
-            if not literal_only_change(before, after):
+            if self.family_names is None:
+                self.family_names = known_names(self.map["sources"])
+            if not change_ok(before, after, self.family_names):
                 return None
             names.add(match.group(2))
         # Inheriting dialects: any family module that imports a changed family module.
@@ -289,12 +341,10 @@ class DependencySelector:
                 if self.proven_sites and len(patches) == 1 and _COMPARE.search(patch_text):
                     # is<->== swaps at sites whose observed operands all use
                     # identity equality cannot change any test (equivalence.py).
-                    normalized_before = normalize(before, path, self.proven_sites)
-                    normalized_after = normalize(after, path, self.proven_sites)
-                    # Ordinals remain meaningful only when every other AST
-                    # component (including operands and bindings) is identical.
-                    if _dump(normalized_before) == _dump(normalized_after):
-                        before, after = normalized_before, normalized_after
+                    if path not in self.equivalence_keys:
+                        self.equivalence_keys[path] = site_keys(path, before)
+                    if equivalent_edits(before, after, path, self.proven_sites, self.equivalence_keys[path]):
+                        continue
                 deferred = []
                 try:
                     functions = changed_functions(before, after, pairs=True)
@@ -330,6 +380,16 @@ class DependencySelector:
         except (InvalidPatch, BroadChange, SyntaxError, UnicodeError, ValueError, TypeError, RecursionError, MemoryError) as error:
             self.last_reason = f"full-suite fallback: {type(error).__name__}: {error}"
             if isinstance(error, BroadChange):
+                if self._inert_tier(patch_text):
+                    self.last_reason = "documentation-only paths"
+                    return set(self.always)
+                if self._docstring_tier(patch_text):
+                    self.last_reason = "docstring-only edits"
+                    return set(self.always)
+                headers = self._header_tier(patch_text)
+                if headers is not None:
+                    self.last_reason = "literal default values of changed functions"
+                    return headers
                 family = self._family_tier(patch_text)
                 if family is not None:
                     self.last_reason = f"dialect-family touch set after: {error}"
